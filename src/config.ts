@@ -697,6 +697,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       "ANTHROPIC_AUTH_TOKEN",
       "ANTHROPIC_BASE_URL",
       "CLAUDE_CODE_OAUTH_TOKEN",
+      // qm-local: reuse an existing Claude Code login (see prepareClaudeHome).
+      "CLAUDE_CREDENTIALS_FILE",
+      "CLAUDE_CREDENTIALS_JSON",
     ].flatMap((name) => (env[name] === undefined ? [] : [[name, env[name]]])),
   ) as NodeJS.ProcessEnv;
   const acpProcessEnv = Object.fromEntries(
