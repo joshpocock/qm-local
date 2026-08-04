@@ -50,7 +50,11 @@ const GATE_PREDICATES: Readonly<Record<SecretGate, (env: NodeJS.ProcessEnv) => b
   "google-oauth": (env) => Boolean(env.GOOGLE_OAUTH_CLIENT_ID),
   "dropbox-oauth": (env) => Boolean(env.DROPBOX_OAUTH_CLIENT_ID),
   "linear-oauth": (env) => Boolean(env.LINEAR_OAUTH_CLIENT_ID),
-  "model-anthropic": (env) => env.MODEL_PROVIDER?.trim() === "anthropic",
+  // qm-local: the claude harness spawns Claude Code, which authenticates
+  // itself from the operator's existing login, a CLAUDE_CODE_OAUTH_TOKEN, or
+  // its own key. Requiring an Anthropic API key there makes subscription
+  // billing impossible, including through upstream's own token path.
+  "model-anthropic": (env) => env.MODEL_PROVIDER?.trim() === "anthropic" && env.HARNESS?.trim() !== "claude",
   "model-openai": (env) => env.MODEL_PROVIDER?.trim() === "openai",
   "model-openrouter": (env) => env.MODEL_PROVIDER?.trim() === "openrouter",
 };
