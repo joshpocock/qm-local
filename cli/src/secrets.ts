@@ -42,9 +42,31 @@ export const FIRST_PARTY_SECRET_SPECS: readonly SecretSpec[] = [
   {
     name: "ANTHROPIC_API_KEY",
     service: "core",
-    required: { when: { kind: "model-provider", provider: "anthropic" }, optionalOtherwise: true },
+    // qm-local: the claude harness spawns Claude Code, which authenticates
+    // itself -- from the operator's existing login, a CLAUDE_CODE_OAUTH_TOKEN,
+    // or its own key. Demanding an API key there makes subscription billing
+    // impossible to configure, including through upstream's own documented
+    // token path. The key stays required for harnesses that bill Anthropic
+    // directly, and remains accepted (just optional) for claude.
+    required: {
+      when: {
+        kind: "all",
+        conditions: [
+          { kind: "model-provider", provider: "anthropic" },
+          {
+            // Unset means the default harness, "pi", which does bill directly.
+            kind: "any",
+            conditions: [
+              { kind: "env-absent", service: "core", name: "HARNESS" },
+              { kind: "env-in", service: "core", name: "HARNESS", values: ["pi", "opencode", "mock"] },
+            ],
+          },
+        ],
+      },
+      optionalOtherwise: true,
+    },
     description:
-      'Anthropic API key: bills the base model when modelProvider is "anthropic", an optional deployment fallback otherwise.',
+      'Anthropic API key: bills the base model when modelProvider is "anthropic" on a harness that calls Anthropic directly. Optional on the claude harness, which authenticates itself, and an optional deployment fallback otherwise.',
   },
   {
     name: "OPENROUTER_API_KEY",
