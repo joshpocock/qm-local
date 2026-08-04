@@ -399,6 +399,15 @@ function runArgs(ctx: DockerCtx, service: ServiceName, image: string): { args: s
     "no",
   ];
   const env = serviceEnv(ctx, service);
+  // qm-local: the service images bake ENV NODE_ENV=production, but the docker
+  // target is a local test drive by definition (its own docs say so, and
+  // `qm rollback` is not even implemented for it). In production mode the
+  // portal refuses PORTAL_LOCAL_AUTH_BYPASS and the auth broker refuses the
+  // http://localhost issuer it was just handed, so browser sign-in is
+  // impossible on this target as shipped. Run the sign-in surfaces in
+  // development mode here; core stays in production mode, so it still demands
+  // signed portal identity and source auth.
+  if (service === "portal" || service === "auth") args.push("-e", "NODE_ENV=development");
   const cleanup = pushEnvArgs(args, env, secretEnvKeys(ctx, service));
   if (service === "core") {
     args.push("-v", `${ctx.prefix}-coredata:/data`);
