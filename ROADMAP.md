@@ -19,9 +19,11 @@ Upstream QM is a genuinely well-designed system with a cloud-first deployment st
 
 - **Codex on your ChatGPT subscription.** `CODEX_AUTH_JSON` / `CODEX_AUTH_JSON_B64` materialize a subscription-mode `auth.json` (the contents of `~/.codex/auth.json` minted by `codex login`), winning over `OPENAI_API_KEY`. For your own instance only — subscriptions are personal; do not serve other users' turns with one. (Claude Code subscriptions already work upstream via `CLAUDE_CODE_OAUTH_TOKEN`.)
 
-## In progress
+- **ACP harness adapter (`HARNESS=acp`).** A fifth harness built on the official `@zed-industries/agent-client-protocol` SDK, so any ACP-speaking agent (Claude Code's ACP bridge, Gemini CLI, and whatever ships next) runs inside QM with its own local auth. Point `ACP_AGENT_CMD` at the agent binary. Streaming, permission-request policy (`ACP_PERMISSION_MODE=auto|deny`, always reject when the turn is read-only), auth-error classification, and cancellation with no orphaned process are covered by tests that drive a real fake agent over the same SDK.
 
-- **ACP harness adapter.** An [Agent Client Protocol](https://agentclientprotocol.com) harness alongside pi/claude/codex/opencode, so any ACP-speaking agent plugs into QM's scoped sandboxes with its own local auth.
+- **Reuse the Claude Code login you already have.** Upstream requires a token from `claude setup-token` because core runs containerized with a jailed `HOME`, so the child never sees your `~/.claude`. Desktop harnesses avoid this by spawning the CLI with your real environment. On the docker target the CLI now auto-detects `~/.claude/.credentials.json` and mounts it read-only, and the harness materializes it into the jail where the child already looks. Log in once with `claude`, and subscription-billed turns just work. `CLAUDE_CREDENTIALS_FILE` / `CLAUDE_CREDENTIALS_JSON` set it explicitly; `QM_NO_HOST_CLAUDE_AUTH=1` opts out.
+
+## In progress
 - **Open-model recipes.** Documented configs for OpenRouter-hosted open models (Kimi, DeepSeek, Qwen — first-class on the pi harness) and local serving via the existing base-URL passthroughs.
 - **QM Local desktop app.** A lightweight desktop shell (Windows first) for the web UI, in a separate repo. Unofficial; not affiliated with or endorsed by Y Combinator.
 
