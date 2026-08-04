@@ -88,6 +88,16 @@ test("the smtp transport demands its own credentials", () => {
   );
 });
 
+test("the console transport needs no credentials and is refused in production", () => {
+  const consoleEnv = { AUTH_EMAIL_TRANSPORT: "console", RESEND_API_KEY: undefined };
+  assert.equal(readConfig(testEnv(consoleEnv)).transport, "console");
+  assert.match(problemsFor(consoleEnv), /console.*may not be used in production/);
+  assert.equal(
+    bootProblems(readConfig(testEnv({ ...consoleEnv, AUTH_ISSUER: "http://localhost:8099" })), false).join(" | "),
+    "",
+  );
+});
+
 test("malformed allowlists and senders are refused", () => {
   assert.match(problemsFor({ AUTH_ALLOWED_EMAILS: "not-an-email" }), /valid, non-placeholder email addresses/);
   assert.match(

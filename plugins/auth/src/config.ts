@@ -1,6 +1,6 @@
 import type { SmtpTlsMode } from "./smtp.ts";
 
-type EmailTransportKind = "resend" | "smtp";
+type EmailTransportKind = "resend" | "smtp" | "console";
 
 interface SmtpSettings {
   host: string;
@@ -83,7 +83,12 @@ function parseJwk(raw: string | undefined): Record<string, unknown> | null {
 export function readConfig(env: NodeJS.ProcessEnv): AuthConfig {
   const issuer = (env.AUTH_ISSUER ?? `http://localhost:${env.PORT ?? 8099}`).replace(/\/$/, "");
   const publicPath = issuerPath(issuer);
-  const transport: EmailTransportKind = env.AUTH_EMAIL_TRANSPORT?.trim() === "smtp" ? "smtp" : "resend";
+  const transportRaw = env.AUTH_EMAIL_TRANSPORT?.trim();
+  // qm-local: "console" prints the sign-in link to the auth service's stdout
+  // instead of sending mail, so a local test drive needs no email provider at
+  // all. Refused when NODE_ENV=production (see validation below).
+  const transport: EmailTransportKind =
+    transportRaw === "smtp" ? "smtp" : transportRaw === "console" ? "console" : "resend";
   return {
     issuer,
     publicPath,
@@ -187,7 +192,12 @@ export function bootProblems(cfg: AuthConfig, isProd: boolean): string[] {
   if (isMissingOrPlaceholder(cfg.emailFrom) || !validEmail(senderAddress(cfg.emailFrom))) {
     problems.push('AUTH_EMAIL_FROM must be a verified sender address, optionally as "Name <sender@example.com>"');
   }
-  if (cfg.transport === "resend") {
+  if (cfg.transport === "console") {
+    if (isProd)
+      problems.push(
+        "AUTH_EMAIL_TRANSPORT=console prints sign-in links to the service log and may not be used in production — use resend or smtp",
+      );
+  } else if (cfg.transport === "resend") {
     if (isMissingOrPlaceholder(cfg.resendApiKey))
       problems.push("RESEND_API_KEY is required when AUTH_EMAIL_TRANSPORT is resend");
   } else {
