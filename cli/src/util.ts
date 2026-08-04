@@ -261,8 +261,15 @@ export function deploymentSecretValue(name: string, fileValue: string | undefine
 }
 
 export function which(bin: string): boolean {
+  // Probe without assuming a Unix filesystem: native Windows Node resolves
+  // "/bin/sh" as C:\bin\sh (ENOENT), so every probe on Windows reported the
+  // tool missing even when it was on PATH. `where` is a Windows built-in.
+  const probe =
+    process.platform === "win32"
+      ? { cmd: "where", args: [bin] }
+      : { cmd: "/bin/sh", args: ["-c", `command -v ${bin}`] };
   try {
-    execFileSync("/bin/sh", ["-c", `command -v ${bin}`], { stdio: "ignore" });
+    execFileSync(probe.cmd, probe.args, { stdio: "ignore" });
     return true;
   } catch {
     return false;

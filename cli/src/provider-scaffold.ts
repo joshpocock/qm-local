@@ -153,18 +153,19 @@ export const dockerScaffold: ProviderScaffold = {
       publicUrl: "http://localhost:8082",
       providerFields: "",
       services: ["core", "web-ui"],
-      env: `{ "core": { "HARNESS": "pi" } }`,
+      env: `{ "core": { "HARNESS": "pi", "SANDBOX_BACKEND": "local" } }`,
       secretEnv: "",
       sandbox: `,
 
-  // The Fly app agents execute in. The core boots the immutable sandbox image
-  // recorded by \`qm sandbox publish\`.
-  "sandbox": { "app": ${JSON.stringify(`${orgId}-sandboxes`)} }`,
+  // qm-local: agent sandboxes run as local Docker containers by default
+  // (SANDBOX_BACKEND=local above), so no Fly app is needed for a test drive.
+  // To boot an operator-published Fly layer image instead, declare it:
+  //   "sandbox": { "app": ${JSON.stringify(`${orgId}-sandboxes`)} }`,
     }),
   ignores: [".env", "node_modules/", ".generated/"],
   agentsAppendix: "",
   files: noFiles,
-  configurationHint: "docker: confirm the local public port and Fly sandbox app before setup",
+  configurationHint: "docker: confirm the local public port before setup",
   finalCommand: "npm exec qm -- up",
   finalWhy: "pull images, start services, print URLs",
 };
