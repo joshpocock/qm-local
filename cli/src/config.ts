@@ -122,7 +122,10 @@ export const MODEL_PROVIDER_HARNESSES: Readonly<Record<ModelProvider, readonly s
 export const isModelProvider = (value: unknown): value is ModelProvider =>
   typeof value === "string" && (MODEL_PROVIDERS as readonly string[]).includes(value);
 
-export const EMAIL_TRANSPORTS = ["resend", "smtp"] as const;
+// qm-local: "console" prints sign-in links to the auth service log instead of
+// emailing them, so a local test drive needs no email provider. The auth
+// plugin refuses it when NODE_ENV=production.
+export const EMAIL_TRANSPORTS = ["resend", "smtp", "console"] as const;
 export type EmailTransport = (typeof EMAIL_TRANSPORTS)[number];
 
 export const isEmailTransport = (value: unknown): value is EmailTransport =>
