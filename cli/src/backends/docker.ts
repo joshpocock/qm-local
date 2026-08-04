@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { CliError, bold, die, dim, errMessage, header, note, ok, step, warn } from "../log.ts";
@@ -444,10 +444,44 @@ function runArgs(ctx: DockerCtx, service: ServiceName, image: string): { args: s
 
 function hostClaudeCredentialsPath(): string | undefined {
   if (process.env.QM_NO_HOST_CLAUDE_AUTH === "1") return undefined;
+  const explicit = process.env.QM_CLAUDE_CREDENTIALS_FILE?.trim();
+  if (explicit) return existsSync(explicit) ? explicit : undefined;
+
+  const candidates: string[] = [];
   const home = process.env.HOME ?? process.env.USERPROFILE;
-  if (!home) return undefined;
-  const path = join(home, ".claude", ".credentials.json");
-  return existsSync(path) ? path : undefined;
+  if (home) candidates.push(join(home, ".claude", ".credentials.json"));
+  // Under WSL the login often lives on the Windows side, where the user
+  // actually runs `claude`, while the Linux home holds an older one.
+  const user = process.env.USER ?? process.env.USERNAME;
+  if (user && existsSync("/mnt/c/Users")) {
+    candidates.push(join("/mnt/c/Users", user, ".claude", ".credentials.json"));
+  }
+
+  const present = candidates.filter((path) => existsSync(path));
+  const unexpired = present.find((path) => claudeCredentialsExpiry(path) > Date.now());
+  if (unexpired) return unexpired;
+  if (present.length) {
+    warn(
+      `the Claude login at ${present[0]} looks expired — run \`claude\` to refresh it, or set QM_CLAUDE_CREDENTIALS_FILE to a current one`,
+    );
+    return present[0];
+  }
+  return undefined;
+}
+
+/** Expiry only; credential values are never read into the CLI's own state. */
+function claudeCredentialsExpiry(path: string): number {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as {
+      claudeAiOauth?: { expiresAt?: number };
+      expiresAt?: number;
+    };
+    const raw = parsed.claudeAiOauth?.expiresAt ?? parsed.expiresAt;
+    if (typeof raw !== "number") return Number.POSITIVE_INFINITY; // no expiry recorded: let the child judge
+    return raw > 1e12 ? raw : raw * 1000;
+  } catch {
+    return 0;
+  }
 }
 
 function statSockGid(): number | undefined {
