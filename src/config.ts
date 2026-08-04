@@ -28,7 +28,7 @@ export interface Config {
   orgId: string;
   sessionStore: "memory" | "postgres";
   databaseUrl?: string;
-  harness: "mock" | "pi" | "opencode" | "codex" | "claude";
+  harness: "mock" | "pi" | "opencode" | "codex" | "claude" | "acp";
   securityPosture: SecurityPosture;
   sandboxBackend: "aws" | "local" | "sprites";
   sandboxSecondaryBackend?: "aws" | "local" | "sprites";
@@ -43,6 +43,11 @@ export interface Config {
   claudeModel?: string;
   claudeBinPath?: string;
   claudeProcessEnv: NodeJS.ProcessEnv;
+  acpModel?: string;
+  acpAgentCmd?: string;
+  acpAgentArgs: string[];
+  acpPermissionMode: "auto" | "deny";
+  acpProcessEnv: NodeJS.ProcessEnv;
   detectModelId?: string;
   titleModelId?: string;
   judgeModelId?: string;
@@ -144,6 +149,7 @@ export interface Config {
 }
 
 export function configuredModelForHarness(config: Config, harness: string): string | undefined {
+  if (harness === "acp") return config.acpModel;
   if (harness === "codex") return config.codexModel;
   if (harness === "claude") return config.claudeModel;
   if (harness === "opencode") return config.opencodeModel;
@@ -464,11 +470,25 @@ function orgBrandingFromEnv(env: NodeJS.ProcessEnv): Config["brandingDefault"] {
 function harnessEnvStrict(value: string | undefined): Config["harness"] {
   if (value === undefined || value.trim() === "") return "mock";
   const harness = value.trim();
-  if (harness === "mock" || harness === "pi" || harness === "opencode" || harness === "codex" || harness === "claude")
+  if (
+    harness === "mock" ||
+    harness === "pi" ||
+    harness === "opencode" ||
+    harness === "codex" ||
+    harness === "claude" ||
+    harness === "acp"
+  )
     return harness;
   throw new Error(
-    `HARNESS=${JSON.stringify(value)} is not recognized — use mock, pi, opencode, codex, or claude, or unset it.`,
+    `HARNESS=${JSON.stringify(value)} is not recognized — use mock, pi, opencode, codex, claude, or acp, or unset it.`,
   );
+}
+
+function acpPermissionModeEnvStrict(value: string | undefined): Config["acpPermissionMode"] {
+  if (value === undefined || value.trim() === "") return "auto";
+  const mode = value.trim();
+  if (mode === "auto" || mode === "deny") return mode;
+  throw new Error(`ACP_PERMISSION_MODE=${JSON.stringify(value)} is not recognized — use auto or deny, or unset it.`);
 }
 
 function sandboxBackendEnvStrict(value: string | undefined, name = "SANDBOX_BACKEND"): Config["sandboxBackend"] {
@@ -555,6 +575,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (missingSecrets.length) {
     throw new Error(`missing or insecure required core secrets: ${missingSecrets.join(", ")}`);
   }
+  const harness = harnessEnvStrict(env.HARNESS);
+  if (harness === "acp" && !env.ACP_AGENT_CMD?.trim()) {
+    throw new Error("HARNESS=acp requires a non-empty ACP_AGENT_CMD");
+  }
   const modelProvider = modelProviderEnvStrict(env);
   for (const key of ["SESSION_STORE", "RUN_STORE", "ARTIFACT_STORE"] as const) {
     if (env[key] === "sqlite") {
@@ -565,7 +589,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       );
     }
   }
-  if (env.NODE_ENV === "production" && harnessEnvStrict(env.HARNESS) === "mock") {
+  if (env.NODE_ENV === "production" && harness === "mock") {
     console.warn(
       `[config] HARNESS is ${env.HARNESS?.trim() ? '"mock"' : "unset, which means mock"} in production — this deployment answers every message with canned text and calls no model provider. Set HARNESS=pi to run real agent turns.`,
     );
@@ -675,6 +699,25 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       "CLAUDE_CODE_OAUTH_TOKEN",
     ].flatMap((name) => (env[name] === undefined ? [] : [[name, env[name]]])),
   ) as NodeJS.ProcessEnv;
+  const acpProcessEnv = Object.fromEntries(
+    [
+      "PATH",
+      "TMPDIR",
+      "LANG",
+      "LC_ALL",
+      "SSL_CERT_FILE",
+      "SSL_CERT_DIR",
+      "NODE_EXTRA_CA_CERTS",
+      "HTTP_PROXY",
+      "HTTPS_PROXY",
+      "NO_PROXY",
+      "ALL_PROXY",
+      "CLAUDE_CODE_OAUTH_TOKEN",
+      "ANTHROPIC_API_KEY",
+      "OPENAI_API_KEY",
+      "GEMINI_API_KEY",
+    ].flatMap((name) => (env[name] === undefined ? [] : [[name, env[name]]])),
+  ) as NodeJS.ProcessEnv;
   const turnWallClockMs =
     (numEnvStrict("TURN_WALL_CLOCK_SEC", env.TURN_WALL_CLOCK_SEC) ?? CONFIG_DEFAULTS.turnWallClockSec) * 1000;
   const runMaxAgeMs =
@@ -689,7 +732,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     orgId: env.ORG_ID ?? DEFAULT_ORG_ID,
     sessionStore: env.SESSION_STORE === "postgres" ? "postgres" : "memory",
     ...(env.DATABASE_URL ? { databaseUrl: env.DATABASE_URL } : {}),
-    harness: harnessEnvStrict(env.HARNESS),
+    harness,
     securityPosture: securityPostureEnvStrict(env.HARNESS_SECURITY_POSTURE),
     securityScreenBackend,
     ...(securityScreenBackend === "proxy"
@@ -721,6 +764,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ...(env.CLAUDE_MODEL ? { claudeModel: env.CLAUDE_MODEL } : {}),
     ...(env.CLAUDE_BIN ? { claudeBinPath: env.CLAUDE_BIN } : {}),
     claudeProcessEnv,
+    ...(env.ACP_MODEL ? { acpModel: env.ACP_MODEL } : {}),
+    ...(env.ACP_AGENT_CMD?.trim() ? { acpAgentCmd: env.ACP_AGENT_CMD.trim() } : {}),
+    acpAgentArgs: env.ACP_AGENT_ARGS?.trim() ? env.ACP_AGENT_ARGS.trim().split(/\s+/) : [],
+    acpPermissionMode: acpPermissionModeEnvStrict(env.ACP_PERMISSION_MODE),
+    acpProcessEnv,
     ...(env.PI_DETECT_MODEL ? { detectModelId: env.PI_DETECT_MODEL } : {}),
     ...(env.PI_TITLE_MODEL ? { titleModelId: env.PI_TITLE_MODEL } : {}),
     ...(env.PI_JUDGE_MODEL ? { judgeModelId: env.PI_JUDGE_MODEL } : {}),
