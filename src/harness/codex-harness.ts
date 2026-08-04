@@ -199,7 +199,10 @@ export function codexChildEnv(source: NodeJS.ProcessEnv, jail: string): NodeJS.P
 export function prepareCodexHome(source: NodeJS.ProcessEnv, jail: string): string {
   const target = join(jail, "codex-home");
   mkdirSync(target, { recursive: true });
-  if (source.OPENAI_API_KEY) {
+  const subscription = codexSubscriptionAuth(source);
+  if (subscription) {
+    writeFileSync(join(target, "auth.json"), subscription, { mode: 0o600 });
+  } else if (source.OPENAI_API_KEY) {
     writeFileSync(
       join(target, "auth.json"),
       JSON.stringify({ auth_mode: "apikey", OPENAI_API_KEY: source.OPENAI_API_KEY }),
@@ -207,6 +210,40 @@ export function prepareCodexHome(source: NodeJS.ProcessEnv, jail: string): strin
     );
   }
   return target;
+}
+
+/**
+ * qm-local: run Codex on the operator's own ChatGPT subscription instead of
+ * API-key billing. CODEX_AUTH_JSON carries the verbatim contents of an
+ * auth.json minted by `codex login` on the operator's machine
+ * (~/.codex/auth.json); CODEX_AUTH_JSON_B64 is the same, base64-encoded for
+ * transports that mangle raw JSON. When either is set it wins over
+ * OPENAI_API_KEY. The subscription belongs to one person: this is for an
+ * operator's own instance, not for serving other users' turns.
+ *
+ * Known limit: the Codex CLI refreshes tokens inside auth.json as they age,
+ * and a fresh jail discards that refresh after each turn, so a long-lived
+ * deployment needs the env value re-minted when the refresh token expires.
+ */
+export function codexSubscriptionAuth(source: NodeJS.ProcessEnv): string | undefined {
+  const raw =
+    source.CODEX_AUTH_JSON ??
+    (source.CODEX_AUTH_JSON_B64
+      ? Buffer.from(source.CODEX_AUTH_JSON_B64, "base64").toString("utf8")
+      : undefined);
+  if (raw === undefined || raw.trim() === "") return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `CODEX_AUTH_JSON is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("CODEX_AUTH_JSON must be a JSON object (the contents of ~/.codex/auth.json)");
+  }
+  return JSON.stringify(parsed);
 }
 
 async function transitionTask(

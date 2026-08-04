@@ -304,6 +304,30 @@ test("Codex materializes API-key auth into its isolated home, and never an ambie
   assert.equal(existsSync(join(prepareCodexHome({ HOME: homedir() }, bare), "auth.json")), false);
 });
 
+test("Codex subscription auth wins over the API key and validates its JSON", (t) => {
+  const subAuth = JSON.stringify({ auth_mode: "chatgpt", tokens: { id_token: "idt", access_token: "act" } });
+
+  const jail = mkdtempSync(join(tmpdir(), "qm-codex-sub-test-"));
+  t.after(() => rmSync(jail, { recursive: true, force: true }));
+  const home = prepareCodexHome({ CODEX_AUTH_JSON: subAuth, OPENAI_API_KEY: "sk-test" }, jail);
+  assert.deepEqual(JSON.parse(readFileSync(join(home, "auth.json"), "utf8")), JSON.parse(subAuth));
+
+  const b64jail = mkdtempSync(join(tmpdir(), "qm-codex-sub-b64-"));
+  t.after(() => rmSync(b64jail, { recursive: true, force: true }));
+  const b64home = prepareCodexHome({ CODEX_AUTH_JSON_B64: Buffer.from(subAuth).toString("base64") }, b64jail);
+  assert.deepEqual(JSON.parse(readFileSync(join(b64home, "auth.json"), "utf8")), JSON.parse(subAuth));
+
+  const badJail = mkdtempSync(join(tmpdir(), "qm-codex-sub-bad-"));
+  t.after(() => rmSync(badJail, { recursive: true, force: true }));
+  assert.throws(() => prepareCodexHome({ CODEX_AUTH_JSON: "not json" }, badJail), /not valid JSON/);
+  assert.throws(() => prepareCodexHome({ CODEX_AUTH_JSON: "[1,2]" }, badJail), /JSON object/);
+
+  const emptyJail = mkdtempSync(join(tmpdir(), "qm-codex-sub-empty-"));
+  t.after(() => rmSync(emptyJail, { recursive: true, force: true }));
+  const emptyHome = prepareCodexHome({ CODEX_AUTH_JSON: "  " }, emptyJail);
+  assert.equal(existsSync(join(emptyHome, "auth.json")), false);
+});
+
 test("Codex children cannot use parent surface, control, or terminal tools", () => {
   assert.equal(codexChildToolAllowed("history"), true);
   assert.equal(codexChildToolAllowed("execute"), true);

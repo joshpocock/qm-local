@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { CliError, bold, die, dim, errMessage, header, note, ok, step, warn } from "../log.ts";
@@ -398,17 +398,41 @@ function runArgs(ctx: DockerCtx, service: ServiceName, image: string): { args: s
     "--restart",
     "no",
   ];
-  const cleanup = pushEnvArgs(args, serviceEnv(ctx, service), secretEnvKeys(ctx, service));
+  const env = serviceEnv(ctx, service);
+  const cleanup = pushEnvArgs(args, env, secretEnvKeys(ctx, service));
   if (service === "core") {
     args.push("-v", `${ctx.prefix}-coredata:/data`);
     for (const m of layerMounts(ctx)) args.push("-v", m);
     for (const m of skillMounts(ctx)) args.push("-v", m);
+    // qm-local: the local sandbox backend runs agent computers as sibling
+    // containers, so a containerized core needs the host daemon socket and a
+    // network it shares with the sandboxes it starts. Mounting docker.sock is
+    // host-root-equivalent access for the core container: acceptable for a
+    // local test drive on your own machine, which is the only place the local
+    // backend runs; the cloud targets never do this.
+    if (env.SANDBOX_BACKEND === "local") {
+      args.push("-v", "/var/run/docker.sock:/var/run/docker.sock");
+      args.push("-e", `LOCAL_SANDBOX_SHARED_NETWORK=${ctx.network}`);
+      const sockGid = statSockGid();
+      if (sockGid !== undefined) args.push("--group-add", String(sockGid));
+    }
   }
   if (def.docker.hostPortOffset !== undefined) {
     args.push("-p", `${baseHostPort(ctx) + def.docker.hostPortOffset}:${def.docker.internalPort}`);
   }
   args.push(image);
   return { args, cleanup };
+}
+
+function statSockGid(): number | undefined {
+  try {
+    return statSync("/var/run/docker.sock").gid;
+  } catch {
+    // No unix socket to stat (e.g. the CLI itself runs on native Windows);
+    // fall back to the root group so the in-container `node` user can reach
+    // the mounted socket. Local-test-drive-only, see the mount note above.
+    return 0;
+  }
 }
 
 function skillMounts(ctx: DockerCtx): string[] {

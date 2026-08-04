@@ -1,6 +1,8 @@
 FROM node:24-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd
 
-RUN apk add --no-cache ca-certificates curl git git-daemon
+# qm-local: docker-cli lets the local sandbox backend start sibling agent
+# containers through the mounted host socket (docker target only).
+RUN apk add --no-cache ca-certificates curl git git-daemon docker-cli
 
 WORKDIR /app
 
