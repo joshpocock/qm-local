@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
-import { chownSync, mkdtempSync, rmSync } from "node:fs";
+import { chownSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -116,6 +116,8 @@ const CLAUDE_ENV_PASSTHROUGH = [
   "ANTHROPIC_AUTH_TOKEN",
   "ANTHROPIC_BASE_URL",
   "CLAUDE_CODE_OAUTH_TOKEN",
+  "CLAUDE_CREDENTIALS_FILE",
+  "CLAUDE_CREDENTIALS_JSON",
 ] as const;
 
 export function claudeChildEnv(source: NodeJS.ProcessEnv, jail: string): NodeJS.ProcessEnv {
@@ -124,6 +126,63 @@ export function claudeChildEnv(source: NodeJS.ProcessEnv, jail: string): NodeJS.
     if (source[name] !== undefined) env[name] = source[name];
   }
   return env;
+}
+
+/**
+ * qm-local: reuse the Claude Code login the operator already has, instead of
+ * making them mint a token with `claude setup-token`.
+ *
+ * A desktop harness gets this for free: it spawns the CLI with the real HOME,
+ * so Claude Code finds its own `~/.claude/.credentials.json`. QM cannot, because
+ * core runs in a container and jails HOME per turn. So the credentials are
+ * carried in explicitly and written into the jail the child actually reads:
+ *
+ * - `CLAUDE_CREDENTIALS_FILE` — path to a credentials.json readable by core
+ *   (the CLI mounts the host file read-only on the docker target), or
+ * - `CLAUDE_CREDENTIALS_JSON` — the same document inline.
+ *
+ * Either wins over `CLAUDE_CODE_OAUTH_TOKEN`, which still works and is the
+ * right choice for a real deployment. This path is for an operator's own local
+ * instance: a subscription belongs to one person, and these credentials reach
+ * the agent's environment, so do not use it to serve other people's turns.
+ */
+export function prepareClaudeHome(source: NodeJS.ProcessEnv, jail: string): string {
+  const target = join(jail, ".claude");
+  mkdirSync(target, { recursive: true });
+  const raw = readClaudeCredentials(source);
+  if (raw !== undefined) {
+    writeFileSync(join(target, ".credentials.json"), raw, { mode: 0o600 });
+  }
+  return target;
+}
+
+function readClaudeCredentials(source: NodeJS.ProcessEnv): string | undefined {
+  const inline = source.CLAUDE_CREDENTIALS_JSON?.trim();
+  const path = source.CLAUDE_CREDENTIALS_FILE?.trim();
+  let raw: string | undefined;
+  if (inline) raw = inline;
+  else if (path) {
+    try {
+      raw = readFileSync(path, "utf8");
+    } catch (err) {
+      throw new Error(
+        `CLAUDE_CREDENTIALS_FILE ${path} could not be read: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+  if (raw === undefined || raw.trim() === "") return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `Claude credentials are not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Claude credentials must be a JSON object (the contents of ~/.claude/.credentials.json)");
+  }
+  return JSON.stringify(parsed);
 }
 
 export function claudeProcessIdentity(uid = process.getuid?.()): { uid: number; gid: number } | undefined {
@@ -326,8 +385,19 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
   const runPrompt = async (turn: HarnessTurnInput, toolsEnabled = true): Promise<HarnessTurnResult> => {
     if (turn.cancel?.aborted) return { reply: "", stopped: true };
     const jail = mkdtempSync(join(tmpdir(), "qm-claude-"));
+    // qm-local: materialize an existing Claude Code login into the jail, so the
+    // child finds it exactly where it looks for its own (see prepareClaudeHome).
+    const claudeHome = prepareClaudeHome(opts.env ?? {}, jail);
     const processIdentity = claudeProcessIdentity();
-    if (processIdentity) chownSync(jail, processIdentity.uid, processIdentity.gid);
+    if (processIdentity) {
+      chownSync(jail, processIdentity.uid, processIdentity.gid);
+      chownSync(claudeHome, processIdentity.uid, processIdentity.gid);
+      try {
+        chownSync(join(claudeHome, ".credentials.json"), processIdentity.uid, processIdentity.gid);
+      } catch {
+        // no credentials file materialized; the child will use token/key env instead
+      }
+    }
     const ref = claudeToolContext(turn);
     const controller = new AbortController();
     ref.abortSignal = controller.signal;

@@ -425,12 +425,29 @@ function runArgs(ctx: DockerCtx, service: ServiceName, image: string): { args: s
       const sockGid = statSockGid();
       if (sockGid !== undefined) args.push("--group-add", String(sockGid));
     }
+    // qm-local: on this local-only target, reuse the operator's own Claude Code
+    // login the way a desktop harness does, instead of requiring
+    // `claude setup-token`. Opt out with QM_NO_HOST_CLAUDE_AUTH=1.
+    const hostClaude = hostClaudeCredentialsPath();
+    if (hostClaude && env.HARNESS === "claude") {
+      args.push("-v", `${hostClaude}:/run/qm/claude-credentials.json:ro`);
+      args.push("-e", "CLAUDE_CREDENTIALS_FILE=/run/qm/claude-credentials.json");
+      note(`claude auth: reusing your local login (${hostClaude})`);
+    }
   }
   if (def.docker.hostPortOffset !== undefined) {
     args.push("-p", `${baseHostPort(ctx) + def.docker.hostPortOffset}:${def.docker.internalPort}`);
   }
   args.push(image);
   return { args, cleanup };
+}
+
+function hostClaudeCredentialsPath(): string | undefined {
+  if (process.env.QM_NO_HOST_CLAUDE_AUTH === "1") return undefined;
+  const home = process.env.HOME ?? process.env.USERPROFILE;
+  if (!home) return undefined;
+  const path = join(home, ".claude", ".credentials.json");
+  return existsSync(path) ? path : undefined;
 }
 
 function statSockGid(): number | undefined {

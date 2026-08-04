@@ -1,11 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   claudeChildAgentAllowed,
   claudeChildEnv,
   claudeProcessIdentity,
   claudeReplayTranscript,
   claudeToolContext,
+  prepareClaudeHome,
   spawnClaudeProcess,
   stripClaudeImageBytes,
 } from "../src/harness/claude-harness.ts";
@@ -124,4 +128,38 @@ test("Claude spawned from a root container runs as nobody", { skip: process.getu
   });
   assert.equal(code, 0);
   assert.equal(output, "65534");
+});
+
+test("Claude reuses an existing local login, from a file or inline, over token env", (t) => {
+  const creds = JSON.stringify({ claudeAiOauth: { accessToken: "at", refreshToken: "rt", expiresAt: 1 } });
+
+  const src = mkdtempSync(join(tmpdir(), "qm-claude-src-"));
+  t.after(() => rmSync(src, { recursive: true, force: true }));
+  const credFile = join(src, ".credentials.json");
+  writeFileSync(credFile, creds);
+
+  const fromFile = mkdtempSync(join(tmpdir(), "qm-claude-file-"));
+  t.after(() => rmSync(fromFile, { recursive: true, force: true }));
+  const home = prepareClaudeHome({ CLAUDE_CREDENTIALS_FILE: credFile, CLAUDE_CODE_OAUTH_TOKEN: "tok" }, fromFile);
+  assert.deepEqual(JSON.parse(readFileSync(join(home, ".credentials.json"), "utf8")), JSON.parse(creds));
+
+  const fromInline = mkdtempSync(join(tmpdir(), "qm-claude-inline-"));
+  t.after(() => rmSync(fromInline, { recursive: true, force: true }));
+  const inlineHome = prepareClaudeHome({ CLAUDE_CREDENTIALS_JSON: creds }, fromInline);
+  assert.deepEqual(JSON.parse(readFileSync(join(inlineHome, ".credentials.json"), "utf8")), JSON.parse(creds));
+
+  // No credentials configured: the directory exists, but nothing is written,
+  // so token/key env remains the auth path.
+  const bare = mkdtempSync(join(tmpdir(), "qm-claude-bare-"));
+  t.after(() => rmSync(bare, { recursive: true, force: true }));
+  assert.equal(existsSync(join(prepareClaudeHome({ CLAUDE_CODE_OAUTH_TOKEN: "tok" }, bare), ".credentials.json")), false);
+
+  const bad = mkdtempSync(join(tmpdir(), "qm-claude-bad-"));
+  t.after(() => rmSync(bad, { recursive: true, force: true }));
+  assert.throws(() => prepareClaudeHome({ CLAUDE_CREDENTIALS_JSON: "nope" }, bad), /not valid JSON/);
+  assert.throws(() => prepareClaudeHome({ CLAUDE_CREDENTIALS_JSON: "[1]" }, bad), /JSON object/);
+  assert.throws(
+    () => prepareClaudeHome({ CLAUDE_CREDENTIALS_FILE: join(src, "missing.json") }, bad),
+    /could not be read/,
+  );
 });
