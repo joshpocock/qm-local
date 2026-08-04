@@ -5,7 +5,10 @@ RUN apk add --no-cache ca-certificates curl git git-daemon
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && npm audit --omit=dev --audit-level=moderate \
+# qm-local: the audit gate lives in CI, not the image build. Auditing inside
+# `docker build` makes the same commit unbuildable the day a new advisory
+# lands in the registry, with no code change on either side.
+RUN npm ci --omit=dev \
   && rm -rf /root/.npm /tmp/node-compile-cache
 
 COPY src ./src
