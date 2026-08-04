@@ -7,13 +7,15 @@ Upstream QM is a genuinely well-designed system with a cloud-first deployment st
 ## Shipped
 
 - **No Fly account needed for the local test drive.** Upstream's docker target refuses to start without a Fly agent-computer app (`sandbox.app`), even though agent sandboxes on that target execute as local Docker containers. The gate is removed; the Fly layer-image path remains an explicit opt-in.
+- **Agent sandboxes actually run locally on the docker target.** Upstream's local sandbox backend dials the exec daemon on the host's loopback, which cannot work when core itself is a container — the deep reason the docker target wanted Fly. Sandboxes now join the deployment's docker network and are dialed by container name (`LOCAL_SANDBOX_SHARED_NETWORK`, wired automatically by the CLI, plus the docker socket mount and `docker-cli` in the core image). Verified end to end: a real model turn executed `uname -a` inside a per-person scoped sandbox container with zero cloud accounts involved.
 - **Works on native Windows.** Upstream probes for external tools by exec'ing `/bin/sh`, which native Windows Node cannot resolve, so `qm doctor` and `qm up` claimed docker/flyctl were missing on any Windows machine. Tool detection now uses `where` on win32. (WSL2 remains the smoothest path; native Windows is no longer a hard wall.)
+- **Builds from source reliably.** Upstream runs `npm audit` inside `docker build`, so the same commit stops building the day a new advisory lands in the registry (true of upstream HEAD as of 2026-08-04). The audit gate belongs in CI and is removed from the image build.
+- **Codex on your ChatGPT subscription.** `CODEX_AUTH_JSON` / `CODEX_AUTH_JSON_B64` materialize a subscription-mode `auth.json` (the contents of `~/.codex/auth.json` minted by `codex login`), winning over `OPENAI_API_KEY`. For your own instance only — subscriptions are personal; do not serve other users' turns with one. (Claude Code subscriptions already work upstream via `CLAUDE_CODE_OAUTH_TOKEN`.)
 
 ## In progress
 
-- **Use the subscriptions you already pay for.** Upstream already passes `CLAUDE_CODE_OAUTH_TOKEN` through to the Claude Code harness (subscription billing, no API key). We're verifying that path end to end, and adding the equivalent for Codex: subscription-mode `auth.json` materialization instead of API-key-only.
 - **ACP harness adapter.** An [Agent Client Protocol](https://agentclientprotocol.com) harness alongside pi/claude/codex/opencode, so any ACP-speaking agent plugs into QM's scoped sandboxes with its own local auth.
-- **Open-model recipes.** Documented, tested configs for OpenRouter-hosted open models (Kimi, DeepSeek, Qwen) and fully local serving (Ollama/vLLM) via the existing base-URL overrides. No code changes needed; the recipes just make it obvious.
+- **Open-model recipes.** Documented configs for OpenRouter-hosted open models (Kimi, DeepSeek, Qwen — first-class on the pi harness) and local serving via the existing base-URL passthroughs.
 - **QM Local desktop app.** A lightweight desktop shell (Windows first) for the web UI, in a separate repo. Unofficial; not affiliated with or endorsed by Y Combinator.
 
 ## Non-goals
