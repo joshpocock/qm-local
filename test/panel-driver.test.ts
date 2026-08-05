@@ -552,6 +552,136 @@ test("a two-round room tells each persona turn where in the panel it is", async 
   );
 });
 
+// ---------------------------------------------------------------------------
+// Threading: a panel's replies hang off the human message that started it.
+// ---------------------------------------------------------------------------
+
+const lastSeq = async (built: BuiltApp, sessionId: string) =>
+  (await built.sessions.getEntries(sessionId)).at(-1)?.seq ?? -1;
+
+const addedSince = async (built: BuiltApp, sessionId: string, seq: number) =>
+  (await built.sessions.getEntries(sessionId)).filter((e) => e.seq > seq);
+
+const ofType = (entries: readonly SessionEntry[], type: SessionEntry["type"]) => entries.filter((e) => e.type === type);
+
+test("a one-round room threads both replies under the human message that opened the panel", async () => {
+  const built = freshApp();
+  const threadRef = "web:U1:thread-1";
+  const { session } = await openRoom(built, threadRef, (ids) => ({ personaIds: ids, rounds: 1 }), ["Scout", "Critic"]);
+
+  const before = await lastSeq(built, session.id);
+  const result = await built.app.turn(webTurn(threadRef, "what is wrong with the pricing page?"));
+  assert.notEqual(result.status, "refused", result.reason);
+
+  const added = await addedSince(built, session.id, before);
+  const users = ofType(added, "user");
+  const assistants = ofType(added, "assistant");
+  assert.equal(users.length, 1, "one human message");
+  assert.equal(assistants.length, 2, "one reply per persona");
+  assert.deepEqual(
+    assistants.map((e) => e.parentSeq),
+    [users[0]!.seq, users[0]!.seq],
+    "both replies point at the human message, not at each other",
+  );
+});
+
+test("a two-round room threads all four replies under the one human message, not under each other", async () => {
+  const built = freshApp();
+  const threadRef = "web:U1:thread-2";
+  const { session } = await openRoom(built, threadRef, (ids) => ({ personaIds: ids, rounds: 2 }), ["Scout", "Critic"]);
+
+  const before = await lastSeq(built, session.id);
+  const result = await built.app.turn(webTurn(threadRef, "two rounds on this, please"));
+  assert.notEqual(result.status, "refused", result.reason);
+
+  const added = await addedSince(built, session.id, before);
+  const users = ofType(added, "user");
+  const assistants = ofType(added, "assistant");
+  assert.equal(users.length, 1, "continuation turns still write no user entry");
+  assert.equal(assistants.length, 4, "two personas over two rounds");
+  assert.deepEqual(
+    assistants.map((e) => e.parentSeq),
+    Array(4).fill(users[0]!.seq),
+    "the whole panel is one thread hanging off one message",
+  );
+  const assistantSeqs = new Set(assistants.map((e) => e.seq));
+  assert.ok(
+    assistants.every((e) => !assistantSeqs.has(e.parentSeq as number)),
+    "no reply is parented to another reply",
+  );
+});
+
+test("a second human message opens a second thread; the first one is not extended", async () => {
+  const built = freshApp();
+  const threadRef = "web:U1:thread-3";
+  const { session } = await openRoom(built, threadRef, (ids) => ({ personaIds: ids, rounds: 1 }), ["Scout", "Critic"]);
+
+  const beforeFirst = await lastSeq(built, session.id);
+  assert.notEqual((await built.app.turn(webTurn(threadRef, "first question"))).status, "refused");
+  const first = await addedSince(built, session.id, beforeFirst);
+
+  const beforeSecond = await lastSeq(built, session.id);
+  assert.notEqual((await built.app.turn(webTurn(threadRef, "second question"))).status, "refused");
+  const second = await addedSince(built, session.id, beforeSecond);
+
+  const firstUser = ofType(first, "user")[0]!;
+  const secondUser = ofType(second, "user")[0]!;
+  assert.notEqual(firstUser.seq, secondUser.seq);
+  assert.deepEqual(
+    ofType(first, "assistant").map((e) => e.parentSeq),
+    [firstUser.seq, firstUser.seq],
+  );
+  assert.deepEqual(
+    ofType(second, "assistant").map((e) => e.parentSeq),
+    [secondUser.seq, secondUser.seq],
+    "the second panel threads under the second message, never under the first",
+  );
+});
+
+test("an @tagged single-agent message threads the same way", async () => {
+  const built = freshApp();
+  const threadRef = "web:U1:thread-4";
+  const { session } = await openRoom(built, threadRef, (ids) => ({ personaIds: ids, rounds: 1 }), ["Scout", "Critic"]);
+
+  const before = await lastSeq(built, session.id);
+  const result = await built.app.turn(webTurn(threadRef, "@Critic what is wrong with the pricing page?"));
+  assert.notEqual(result.status, "refused", result.reason);
+
+  const added = await addedSince(built, session.id, before);
+  const users = ofType(added, "user");
+  const assistants = ofType(added, "assistant");
+  assert.equal(assistants.length, 1, "only the tagged agent spoke");
+  assert.equal(personaOf(assistants[0]!)?.name, "Critic");
+  assert.equal(assistants[0]!.parentSeq, users[0]!.seq, "and its reply hangs off the human message");
+});
+
+test("a conversation with no room keeps the linear parent chain it has today", async () => {
+  const built = freshApp();
+  const threadRef = "web:U1:thread-plain";
+
+  // Control: no room anywhere in this session. `!preamble` makes the mock harness emit a
+  // tool_call/tool_result pair before the reply, so the linear chain and a thread parent
+  // are genuinely different numbers here.
+  await built.app.turn(webTurn(threadRef, "hello"));
+  const session = (await built.sessions.getByThread(threadRef))!;
+  const before = await lastSeq(built, session.id);
+  assert.notEqual((await built.app.turn(webTurn(threadRef, "!preamble looking now"))).status, "refused");
+
+  const added = await addedSince(built, session.id, before);
+  const user = ofType(added, "user")[0]!;
+  const assistants = ofType(added, "assistant");
+  assert.ok(assistants.length >= 1, "the plain turn still replies");
+  assert.ok(ofType(added, "tool_call").length >= 1, "and it used a tool on the way");
+  for (const entry of added) {
+    assert.equal(entry.parentSeq, entry.seq - 1, `entry ${entry.seq} (${entry.type}) keeps the linear parent`);
+  }
+  assert.notEqual(
+    assistants.at(-1)!.parentSeq,
+    user.seq,
+    "which is emphatically not the threaded parent a room would have stamped",
+  );
+});
+
 test("a room whose agents are all disabled falls back to a single ordinary turn", async () => {
   const built = freshApp();
   const threadRef = "web:U1:room-2";

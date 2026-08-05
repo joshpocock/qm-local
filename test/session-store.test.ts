@@ -116,6 +116,42 @@ for (const [name, make] of backends) {
     await assert.rejects(store.append(lease, { type: "user", payload: {}, scopeLabel: s.scopeId }));
   });
 
+  test(`${name}: an explicit parentSeq threads an entry; omitting it keeps seq - 1`, async () => {
+    const store = make();
+    const s = await store.getOrCreateByThread("t1", "dm", scopeId("personal", "U1"));
+    const { lease } = await store.acquireLease(s.id);
+    assert.ok(lease);
+
+    const user = await store.append(lease, { type: "user", payload: { text: "hi" }, scopeLabel: s.scopeId });
+    const filler = await store.append(lease, { type: "tool_call", payload: { tool: "x" }, scopeLabel: s.scopeId });
+    const threaded = await store.append(lease, {
+      type: "assistant",
+      payload: { text: "a" },
+      scopeLabel: s.scopeId,
+      parentSeq: user.seq,
+    });
+    const linear = await store.append(lease, { type: "assistant", payload: { text: "b" }, scopeLabel: s.scopeId });
+    const rooted = await store.append(lease, {
+      type: "assistant",
+      payload: { text: "c" },
+      scopeLabel: s.scopeId,
+      parentSeq: null,
+    });
+
+    assert.equal(filler.parentSeq, user.seq, "no parent given → the linear chain");
+    assert.equal(threaded.parentSeq, user.seq, "an explicit parent is honored, skipping the entry in between");
+    assert.equal(linear.parentSeq, threaded.seq, "omitting it again falls straight back to seq - 1");
+    assert.equal(rooted.parentSeq, null, "an explicit null is a parent, not an omission");
+
+    const read = await store.getEntries(s.id);
+    assert.deepEqual(
+      read.map((e) => e.parentSeq),
+      [null, user.seq, user.seq, threaded.seq, null],
+      "and it round-trips through the log",
+    );
+    await store.releaseLease(lease);
+  });
+
   test(`${name}: getByThread is a pure lookup (null on miss, never creates)`, async () => {
     const store = make();
     assert.equal(await store.getByThread("nope"), null, "missing thread → null, no session created");

@@ -1895,6 +1895,17 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         }
         const visibleHistory = filterHistory(forModelContext(rawEntries, { includeSecurityTainted: false }));
         const maxEntrySeq = rawEntries.length ? rawEntries[rawEntries.length - 1]!.seq : -1;
+        // Room threading: the seq of the newest `user` entry already in the log, read off the
+        // history this turn has anyway (no extra query). A panel's continuation turns write no
+        // user entry, so every persona in the panel lands on the same message — which is exactly
+        // the human message that opened it. undefined when the session has never had one.
+        const priorUserEntrySeq = (() => {
+          for (let i = rawEntries.length - 1; i >= 0; i -= 1) {
+            const entry = rawEntries[i]!;
+            if (entry.type === "user") return entry.seq;
+          }
+          return undefined;
+        })();
         const rehydrateTape = (messages: readonly unknown[]) => {
           let readableHandles: Awaited<ReturnType<typeof deps.acl.handlesForAudience>> | undefined;
           const mayReadArtifact = async (artifact: FileArtifact): Promise<boolean> => {
@@ -2261,7 +2272,23 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                   if (syntheticPrompt) payload.hidden = true;
                   return { ...tainted, payload };
                 })();
-                const appended = await withManagedRosterVersion(() => deps.sessions.append(lease, stored));
+                // In a panel turn the persona's reply threads under the human message that
+                // started the panel: the newest `user` entry in the session, which is either the
+                // one this very turn just wrote (round 1) or the one an earlier turn of the same
+                // panel wrote (every continuation). Only the final `assistant` entry threads —
+                // thinking / tool_call / tool_result keep the default linear parent, so a client
+                // that walks the chain still sees a persona's own working order. With no user
+                // entry anywhere (a proactive or ambient room turn) we leave the default alone.
+                const panelParentSeq =
+                  input.panel && stored.type === "assistant"
+                    ? (spine.turnUserEntrySeq ?? priorUserEntrySeq)
+                    : undefined;
+                const appended = await withManagedRosterVersion(() =>
+                  deps.sessions.append(
+                    lease,
+                    panelParentSeq === undefined ? stored : { ...stored, parentSeq: panelParentSeq },
+                  ),
+                );
                 emittedEntries.push(appended);
                 if (appended.type === "user" && spine.turnUserEntrySeq === undefined)
                   spine.turnUserEntrySeq = appended.seq;

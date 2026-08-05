@@ -409,7 +409,9 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
         const full: SessionEntry = {
           sessionId: lease.sessionId,
           seq,
-          parentSeq: seq === 0 ? null : seq - 1,
+          // An explicit parent threads this entry under an older one; without one the log
+          // stays the linear chain it has always been.
+          parentSeq: entry.parentSeq !== undefined ? entry.parentSeq : seq === 0 ? null : seq - 1,
           type: entry.type,
           payload: JSON.parse(stored),
           scopeLabel: entry.scopeLabel as ScopeId,

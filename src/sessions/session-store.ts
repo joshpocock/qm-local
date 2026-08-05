@@ -23,6 +23,13 @@ export interface NewEntry {
   type: EntryType;
   payload: unknown;
   scopeLabel: ScopeId;
+  /**
+   * Explicit thread parent. Omit (the normal case) and the store keeps the linear
+   * chain — `seq - 1`, or null for the first entry. Set it to thread this entry under
+   * an older one: a room panel points every persona reply at the human message that
+   * opened the panel, so a client can render "3 replies" under that message.
+   */
+  parentSeq?: number | null;
 }
 
 interface ParticipantViewPatch {
