@@ -408,6 +408,26 @@ function runArgs(ctx: DockerCtx, service: ServiceName, image: string): { args: s
   // development mode here; core stays in production mode, so it still demands
   // signed portal identity and source auth.
   if (service === "portal" || service === "auth") args.push("-e", "NODE_ENV=development");
+  // qm-local: on a local test drive, signing in should not be a chore. The
+  // portal already ships a local bypass, gated three ways (explicitly
+  // requested, not production, and a localhost/127.0.0.1/::1 public URL), so
+  // it cannot apply to a real deployment. Default it on for the docker target
+  // and sign in as the first admin from ADMIN_GRANTS. Opt out with
+  // QM_NO_LOCAL_AUTH_BYPASS=1, or by setting PORTAL_LOCAL_AUTH_BYPASS
+  // yourself, to walk the real sign-in flow instead.
+  if (service === "portal" && localAuthBypassEnabled(env)) {
+    args.push("-e", "PORTAL_LOCAL_AUTH_BYPASS=1");
+    // Peer address cannot gate this from inside a container (host traffic
+    // arrives from the bridge gateway), so the port is published to the host's
+    // loopback instead - see hostPortBinding below. The two must move together.
+    args.push("-e", "PORTAL_LOCAL_BYPASS_TRUSTED_INGRESS=1");
+    const principal = env.PORTAL_DEV_PRINCIPAL ?? firstAdminGrant(ctx);
+    if (principal) args.push("-e", `PORTAL_DEV_PRINCIPAL=${principal}`);
+    note(
+      `sign-in: local bypass on (as ${principal ?? "the default dev principal"}), portal bound to 127.0.0.1; ` +
+        `set QM_NO_LOCAL_AUTH_BYPASS=1 for the real sign-in flow`,
+    );
+  }
   const cleanup = pushEnvArgs(args, env, secretEnvKeys(ctx, service));
   if (service === "core") {
     args.push("-v", `${ctx.prefix}-coredata:/data`);
@@ -442,7 +462,12 @@ function runArgs(ctx: DockerCtx, service: ServiceName, image: string): { args: s
     }
   }
   if (def.docker.hostPortOffset !== undefined) {
-    args.push("-p", `${baseHostPort(ctx) + def.docker.hostPortOffset}:${def.docker.internalPort}`);
+    const hostPort = baseHostPort(ctx) + def.docker.hostPortOffset;
+    // Binding to 127.0.0.1 is what keeps the auth bypass a this-machine-only
+    // affair; docker's default 0.0.0.0 would expose an unauthenticated portal
+    // to the whole LAN.
+    const bind = service === "portal" && localAuthBypassEnabled(env) ? "127.0.0.1:" : "";
+    args.push("-p", `${bind}${hostPort}:${def.docker.internalPort}`);
   }
   args.push(image);
   return { args, cleanup };
@@ -473,6 +498,21 @@ function hostClaudeCredentialsPath(): string | undefined {
     return present[0];
   }
   return undefined;
+}
+
+/**
+ * Local sign-in bypass: on by default for this local-only target, off if the
+ * operator asked for the real flow or configured the portal env themselves.
+ */
+function localAuthBypassEnabled(env: Record<string, string>): boolean {
+  return process.env.QM_NO_LOCAL_AUTH_BYPASS !== "1" && env.PORTAL_LOCAL_AUTH_BYPASS === undefined;
+}
+
+/** First email in ADMIN_GRANTS ("a@x.com:org_admin,b@x.com:org_admin"). */
+function firstAdminGrant(ctx: DockerCtx): string | undefined {
+  const raw = process.env.ADMIN_GRANTS ?? readEnvValue(ctx.envFile, "ADMIN_GRANTS");
+  const first = raw?.split(",")[0]?.split(":")[0]?.trim();
+  return first || undefined;
 }
 
 /** Same idea as the Claude login, for `codex login` (~/.codex/auth.json). */
