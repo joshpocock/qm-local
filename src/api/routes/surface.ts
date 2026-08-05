@@ -996,10 +996,29 @@ async function getSurfaceConfig(ctx: ApiCtx): Promise<void> {
     webuiModels: configuredPicker.length ? configuredPicker : allowed,
     baseModel: resolvedBase,
     harnessId,
-    ...(managedKeys ? { modelProviderConfigured: Object.values(managedKeys).some(Boolean) } : {}),
+    ...(managedKeys
+      ? {
+          // qm-local: a self-authenticating harness spawns a CLI that carries
+          // its own credentials (an existing login, an OAuth token, or its own
+          // key), so "no managed API key" does not mean "not set up". Without
+          // this the surfaces show the onboarding wall on a deployment that
+          // answers turns perfectly well.
+          modelProviderConfigured:
+            Object.values(managedKeys).some(Boolean) || harnessAuthenticatesItself(harnessId),
+        }
+      : {}),
     externalSlackParticipants,
     ...(Object.keys(resolvedBranding).length ? { branding: resolvedBranding } : {}),
   });
+}
+
+/**
+ * qm-local: harnesses that spawn a CLI which brings its own credentials. For
+ * these, a managed provider API key is one option rather than a prerequisite,
+ * which is why the deployment secret schemas do not demand one either.
+ */
+function harnessAuthenticatesItself(harnessId: HarnessId): boolean {
+  return harnessId === "claude" || harnessId === "codex" || harnessId === "acp";
 }
 
 function runtimeFallback(ctx: ApiCtx): { harnessId: HarnessId; modelId: string } {
