@@ -1,5 +1,12 @@
-import type { Conversation, Principal, TurnRequest, TurnResult } from "../types.ts";
-import { orgId as orgIdOf } from "../config.ts";
+import type { Conversation, Principal, RoomConfig, TurnRequest, TurnResult } from "../types.ts";
+import { agentRoomsEnabled, orgId as orgIdOf } from "../config.ts";
+import {
+  PANEL_MAX_PERSONAS,
+  panelMembersFrom,
+  runPanel,
+  type PanelState,
+  type PanelTurnSpec,
+} from "../agents/panel-driver.ts";
 import { scopeId } from "../types.ts";
 import { isHalt, routeWake, type Wake } from "../wake/wake.ts";
 import type { OrchestratorInput } from "../core/orchestrator.ts";
@@ -23,11 +30,7 @@ import { unscreenedNotice } from "../security/security-posture.ts";
 import type { AppHelpers } from "./app-helpers.ts";
 import type { AmbientHelpers } from "./app-ambient.ts";
 
-export function createTurnMethods(
-  deps: AppDeps,
-  h: AppHelpers,
-  ambient: AmbientHelpers,
-): Pick<
+type TurnMethods = Pick<
   App,
   | "turn"
   | "getApproval"
@@ -38,7 +41,9 @@ export function createTurnMethods(
   | "activeRunForThread"
   | "signalRun"
   | "replayOrphanedRunSignals"
-> {
+>;
+
+export function createTurnMethods(deps: AppDeps, h: AppHelpers, ambient: AmbientHelpers): TurnMethods {
   const {
     withAdminLink,
     drive,
@@ -52,7 +57,96 @@ export function createTurnMethods(
     replayOrphanedRunSignals,
   } = h;
   const { shouldRouteToSpine, markTriggerHandled, addressedWakeText } = ambient;
-  return {
+
+  /**
+   * Panels in flight, keyed by thread. A fresh human message flips `abort` so the driver stops
+   * after the persona turn it is already running and the human gets the floor back.
+   */
+  const activePanels = new Map<string, PanelState>();
+
+  /**
+   * Runs a bounded panel for a room. Returns null when the roster has no usable agents left,
+   * which means "fall through and take this turn the ordinary way".
+   */
+  async function runRoomPanel(req: TurnRequest, threadRef: string, room: RoomConfig): Promise<TurnResult | null> {
+    const running = activePanels.get(threadRef);
+    if (running) running.abort = true;
+
+    const members = panelMembersFrom(
+      await Promise.all(room.personaIds.slice(0, PANEL_MAX_PERSONAS).map((id) => deps.personas.get(id))),
+    );
+    if (!members.length) return null;
+
+    const state: PanelState = { abort: false };
+    activePanels.set(threadRef, state);
+    const wantAsync = req.async === true;
+
+    let settled = false;
+    let resolveFirst!: (r: TurnResult) => void;
+    const firstResult = new Promise<TurnResult>((resolve) => {
+      resolveFirst = (r) => {
+        if (settled) return;
+        settled = true;
+        resolve(r);
+      };
+    });
+
+    const personaRequest = (spec: PanelTurnSpec, async: boolean): TurnRequest => {
+      const next: TurnRequest = {
+        ...req,
+        text: spec.text,
+        panel: { persona: spec.persona, continuation: spec.continuation },
+        harness: spec.harness,
+        model: spec.model,
+        async,
+        // Every persona turn is its own run; sharing the human's key would collapse them into one.
+        ...(req.idempotencyKey ? { idempotencyKey: `${req.idempotencyKey}:panel-${spec.index}` } : {}),
+      };
+      if (spec.continuation) {
+        // The human's payload rides along with the first turn only.
+        delete next.attachments;
+        delete next.overheard;
+        delete next.priorTurns;
+        delete next.inboundNotes;
+        delete next.displayText;
+      }
+      return next;
+    };
+
+    const run = async (spec: PanelTurnSpec): Promise<{ reply?: string }> => {
+      if (spec.index === 0 && wantAsync) {
+        // Async callers get the first persona's run id straight away; the rest of the panel
+        // continues in the background off the same driver loop.
+        const queued = await methods.turn(personaRequest(spec, true));
+        resolveFirst(queued);
+        if (queued.status !== "queued" || !queued.runId) {
+          state.abort = true;
+          return {};
+        }
+        return drive(queued.runId);
+      }
+      const result = await methods.turn(personaRequest(spec, false));
+      if (spec.index === 0) {
+        resolveFirst(result);
+        if (result.status === "refused" || result.status === "failed") state.abort = true;
+      }
+      return result;
+    };
+
+    const panel = runPanel({ members, rounds: room.rounds, text: req.text, state, run })
+      .catch((err) => {
+        console.error(`[panel] thread=${threadRef} ${errMessage(err)}`);
+      })
+      .finally(() => {
+        if (activePanels.get(threadRef) === state) activePanels.delete(threadRef);
+        resolveFirst({ status: "failed", reason: "the room produced no turns" });
+      });
+
+    if (!wantAsync) await panel;
+    return firstResult;
+  }
+
+  const methods: TurnMethods = {
     async turn(req: TurnRequest): Promise<TurnResult> {
       await deps.identity.refresh();
       const actor: Principal = deps.identity.resolve(req.actor);
@@ -238,6 +332,7 @@ export function createTurnMethods(
         ...(req.inboundNotes?.length ? { inboundNotes: req.inboundNotes } : {}),
         ...(req.harness ? { harness: req.harness } : {}),
         ...(req.model ? { model: req.model } : {}),
+        ...(req.panel ? { panel: req.panel } : {}),
         ...turnModelOptions(req),
         ...(req.readOnly ? { readOnly: true } : {}),
         ...(req.surfaceTools ? { surfaceTools: true } : {}),
@@ -400,6 +495,16 @@ export function createTurnMethods(
       }
 
       const known = await deps.sessions.getByThread(conversation.threadRef);
+
+      // A human message into a room does not run a turn of its own: it is handed to the first
+      // persona, and the driver takes the floor from there. Persona turns come back through
+      // here carrying `panel`, which is what keeps this from recursing.
+      const personTyped = origin.kind === "human" || origin.kind === "direct";
+      if (agentRoomsEnabled() && !req.panel && !req.approval && known?.room && personTyped) {
+        const panelled = await runRoomPanel(req, conversation.threadRef, known.room);
+        if (panelled) return panelled;
+      }
+
       const participants = known ? await deps.sessions.participantsOf(known.id) : [];
       const enqueue = () =>
         deps.runs.enqueue({
@@ -516,4 +621,5 @@ export function createTurnMethods(
       return replayOrphanedRunSignals(runId).then(() => undefined);
     },
   };
+  return methods;
 }

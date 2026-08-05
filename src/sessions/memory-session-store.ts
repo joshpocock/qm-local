@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Session, SessionEntry, ScopeId } from "../types.ts";
+import type { RoomConfig, Session, SessionEntry, ScopeId } from "../types.ts";
 import type {
   AttributedTurn,
   CronGroupSummary,
@@ -99,6 +99,13 @@ export function createMemorySessionStore(opts: StoreOptions = {}): SessionStore 
     async updateTitle(sessionId, title) {
       const s = sessions.get(sessionId);
       if (s) s.title = title;
+    },
+
+    async setRoom(sessionId, room: RoomConfig | null) {
+      const s = sessions.get(sessionId);
+      if (!s) return;
+      if (room) s.room = { personaIds: [...room.personaIds], rounds: room.rounds };
+      else delete s.room;
     },
 
     async acquireLease(sessionId, holder): Promise<LeaseAttempt> {

@@ -1,4 +1,4 @@
-import type { EntryType, ScopeId, Session, SessionEntry, SessionType } from "../types.ts";
+import type { EntryType, RoomConfig, ScopeId, Session, SessionEntry, SessionType } from "../types.ts";
 
 export interface Lease {
   sessionId: string;
@@ -416,6 +416,9 @@ export interface SessionStore {
   get(sessionId: string): Promise<Session | null>;
 
   updateTitle(sessionId: string, title: string): Promise<void>;
+
+  /** Set (or clear, with `null`) the agent-room roster on a session. */
+  setRoom(sessionId: string, room: RoomConfig | null): Promise<void>;
 
   acquireLease(sessionId: string, holder?: LeaseHolder): Promise<LeaseAttempt>;
   releaseLease(lease: Lease): Promise<void>;

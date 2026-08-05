@@ -3,6 +3,7 @@ import type {
   PendingApproval,
   PendingApprovalRecord,
   Permission,
+  RoomConfig,
   ScopeId,
   Session,
   SessionEntry,
@@ -279,6 +280,7 @@ export interface App {
     principalId: string,
     patch: { title?: string | null; archived?: boolean; pinned?: boolean; color?: string | null },
   ): Promise<Session | null>;
+  updateSessionRoom(sessionId: string, principalId: string, room: RoomConfig | null): Promise<Session | null>;
   regenerateTitle(sessionId: string, principalId: string): Promise<{ title: string | null } | null>;
   forkSession(
     sessionId: string,

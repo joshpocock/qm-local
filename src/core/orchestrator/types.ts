@@ -50,6 +50,7 @@ import type { DurableMap } from "../../persistence/durable-map.ts";
 import type { BlobTransferStore } from "../../persistence/blob-transfer.ts";
 import type { AdvisoryLock } from "../../persistence/advisory-lock.ts";
 import type { SkillStore } from "../../skills/skill-store.ts";
+import type { AgentPersonaStore } from "../../agents/persona-store.ts";
 import type { OAuthClientResolver } from "../../connectors/oauth.ts";
 import type { SkillBundleStore } from "../../skills/skill-bundle-store.ts";
 import type { BrokeredLayerTool, DeploymentLayerRuntime } from "../../deployment/load-layer.ts";
@@ -124,6 +125,8 @@ export interface OrchestratorDeps {
   memory: MemoryService;
   memoryPolicy?: MemoryPolicy;
   memoryStrategy?: MemoryStrategy;
+  /** Agent-room personas; absent when the feature is not wired, which disables every room path. */
+  personas?: AgentPersonaStore;
   skills?: SkillStore;
   skillBundles?: SkillBundleStore;
   skillsReady?: Promise<void>;

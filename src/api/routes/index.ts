@@ -25,6 +25,7 @@ import { deploymentLayerRoutes } from "./deployment-layer.ts";
 import { egressAuditRoutes } from "./egress-audit.ts";
 import { authBrokerRoutes } from "./auth-broker.ts";
 import { agentRoutes } from "./agents.ts";
+import { roomRoutes } from "./rooms.ts";
 
 export const rawRoutes: ReadonlyArray<Route<BaseCtx>> = [
   { method: "GET", path: "/healthz", auth: "public", handle: ({ res }) => sendJson(res, 200, { ok: true }) },
@@ -63,4 +64,5 @@ export const apiRoutes: ReadonlyArray<Route<ApiCtx>> = [
   ...egressAuditRoutes,
   ...authBrokerRoutes,
   ...agentRoutes(),
+  ...roomRoutes(),
 ];

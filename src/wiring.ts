@@ -923,6 +923,7 @@ export function buildApp(
     ...(config.publicWebUrl ? { publicWebUrl: config.publicWebUrl } : {}),
     memoryPolicy: { recall: config.memoryRecall, capture: config.memoryCapture },
     memoryStrategy,
+    ...(config.agentRooms ? { personas } : {}),
     skills,
     skillBundles,
     skillsReady,

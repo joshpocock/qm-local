@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createPgPool, type PoolClient, withPgTransaction } from "../persistence/pg-pool.ts";
 import { jsonbSafeStringify } from "../util/text.ts";
-import type { Session, SessionEntry, SessionType, ScopeId } from "../types.ts";
+import type { RoomConfig, Session, SessionEntry, SessionType, ScopeId } from "../types.ts";
 import type {
   AttributedTurn,
   CronGroupSummary,
@@ -36,13 +36,26 @@ import {
   userMessagePreview,
 } from "./session-store.ts";
 
+/** `room` is a JSON blob in a TEXT column; unparseable rows read as "no room" rather than throwing. */
+function parseRoom(raw: unknown): RoomConfig | undefined {
+  if (typeof raw !== "string" || !raw.trim()) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as RoomConfig | null;
+    return parsed && Array.isArray(parsed.personaIds) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function rowToSession(r: Record<string, unknown>): Session {
+  const room = parseRoom(r.room);
   return {
     id: r.id as string,
     type: r.type as SessionType,
     scopeId: r.scope_id as ScopeId,
     threadRef: r.thread_ref as string,
     ...(r.surface != null ? { surface: r.surface as string } : {}),
+    ...(room ? { room } : {}),
     createdAt: Number(r.created_at),
     ...(r.title != null ? { title: r.title as string } : {}),
     ...(r.channel_name != null ? { channelName: r.channel_name as string } : {}),
@@ -167,6 +180,7 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
     `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS channel_name TEXT`,
     `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS surface TEXT`,
     `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_activity BIGINT`,
+    `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS room TEXT`,
     `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS messages INT`,
     `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS turns INT`,
     `CREATE TABLE IF NOT EXISTS session_entries(
@@ -341,6 +355,13 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
 
     async updateTitle(sessionId, title): Promise<void> {
       await q("UPDATE sessions SET title = $2 WHERE id = $1", [sessionId, title]);
+    },
+
+    async setRoom(sessionId, room): Promise<void> {
+      await q("UPDATE sessions SET room = $2 WHERE id = $1", [
+        sessionId,
+        room ? jsonbSafeStringify({ personaIds: room.personaIds, rounds: room.rounds }) : null,
+      ]);
     },
 
     async acquireLease(sessionId, holder): Promise<LeaseAttempt> {

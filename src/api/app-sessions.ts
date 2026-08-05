@@ -42,6 +42,7 @@ export function createSessionMethods(
   | "membershipControlsScope"
   | "authorizesCapabilityScope"
   | "updateSession"
+  | "updateSessionRoom"
   | "regenerateTitle"
   | "forkSession"
   | "grant"
@@ -387,6 +388,23 @@ export function createSessionMethods(
       const before = await sessionsForViewer(principalId);
       if (!before.some((s) => s.id === sessionId)) return null;
       await deps.sessions.updateParticipantView(sessionId, principalId, patch);
+      const after = await sessionsForViewer(principalId);
+      return after.find((s) => s.id === sessionId) ?? null;
+    },
+
+    async updateSessionRoom(sessionId, principalId, room) {
+      const mine = await sessionsForViewer(principalId);
+      const session = mine.find((s) => s.id === sessionId);
+      if (!session) return null;
+      await deps.sessions.setRoom(sessionId, room);
+      deps.auditLog.record({
+        at: Date.now(),
+        principalId,
+        action: room ? "agent_room_set" : "agent_room_clear",
+        resource: sessionId,
+        scopeLabel: session.scopeId,
+        ...(room ? { detail: JSON.stringify(room) } : {}),
+      });
       const after = await sessionsForViewer(principalId);
       return after.find((s) => s.id === sessionId) ?? null;
     },

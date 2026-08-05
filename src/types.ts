@@ -60,12 +60,26 @@ export interface Conversation {
 
 export type SessionType = "dm" | "channel" | "group";
 
+/**
+ * Roster for an agent room. `room == null` on a session means "behaves exactly as it
+ * always has" — every room-only code path is keyed off this being present.
+ */
+export interface RoomConfig {
+  /** 1-4 persona ids, in the order they speak */
+  personaIds: string[];
+  rounds: 1 | 2 | 3;
+}
+
+export const ROOM_MAX_PERSONAS = 4;
+export const ROOM_MAX_ROUNDS = 3;
+
 export interface Session {
   id: string;
   type: SessionType;
   scopeId: ScopeId;
   threadRef: string;
   surface?: string;
+  room?: RoomConfig;
   createdAt: number;
   channelName?: string;
   title?: string | null;
@@ -398,6 +412,12 @@ export interface TurnRequest {
   inboundNotes?: string[];
   model?: string;
   harness?: string;
+  /**
+   * Set only by the panel driver: this turn is one persona speaking in a room.
+   * `continuation` means the text is the driver's nudge rather than something a human
+   * wrote, so it reaches the harness but never lands in the transcript as a user entry.
+   */
+  panel?: { persona: { id: string; name: string }; continuation: boolean };
   thinkingLevel?: string;
   fastMode?: boolean;
   readOnly?: boolean;

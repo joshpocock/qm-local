@@ -74,9 +74,11 @@ import { createToolContext, NeedsApproval, CommandDenied } from "../tools/primit
 import type { BrokeredLayerTool } from "../deployment/load-layer.ts";
 import type { FileArtifact } from "../files/file-artifact-store.ts";
 import { filterHistoryForAudience, principalEntitledToScope } from "../resolution/context-filter.ts";
+import { renderPanelSystemBlock } from "../agents/panel-driver.ts";
+import type { AgentPersona } from "../agents/persona-store.ts";
 import {
   filterTapeForAudience,
-  foldTape,
+  foldTapeForPersona,
   healFoldInterrupt,
   lastImportLacksScopes,
   lintFold,
@@ -185,6 +187,32 @@ const DEFAULT_APPROVAL_SUMMARY_TIMEOUT_MS = 6_000;
 const CONNECTOR_HOSTS = Object.values(PROVIDERS).flatMap((p) => p.hosts);
 const INSTANCE_CACHE_MAX_ENTRIES = 5_000;
 const DIRECTORY_INDEX_CACHE_MAX_ENTRIES = 100;
+
+/**
+ * Persona instructions + roster for one room turn, or "" when anything is missing — a room whose
+ * personas were deleted mid-panel degrades to an ordinary turn rather than failing it.
+ */
+async function panelSystemBlock(
+  deps: Pick<OrchestratorDeps, "personas" | "sessions">,
+  threadRef: string,
+  personaId: string,
+): Promise<string> {
+  const personas = deps.personas;
+  if (!personas) return "";
+  try {
+    const speaker = await personas.get(personaId);
+    if (!speaker) return "";
+    const room = (await deps.sessions.getByThread(threadRef))?.room;
+    const ids = room?.personaIds.length ? room.personaIds : [personaId];
+    const roster = (await Promise.all(ids.map((id) => personas.get(id)))).filter(
+      (p): p is AgentPersona => !!p && p.archivedAt === undefined,
+    );
+    return `\n\n${renderPanelSystemBlock(speaker, roster)}`;
+  } catch (e) {
+    swallow("orchestrator: panel system block", e);
+    return "";
+  }
+}
 
 export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   const skillMaterializer = createSkillMaterializer(deps.advisoryLock);
@@ -797,7 +825,12 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         modeFrame += "\nNo one has written yet; open the conversation yourself per the onboarding note below.";
       }
       const sharedCore = applyPromptVars(SHARED_CORE_MD, { botName, orgName });
-      let systemPrompt = `${modeFrame}\n\n${resolution.systemPrompt}\n\n${sharedCore}\n\n${renderSecurityPolicyPrompt(securityPolicy)}`;
+      // A persona composes directly below the SOUL stack, under the same org-authoritative
+      // framing, followed by the roster it is speaking to. Outside rooms this is empty.
+      const panelBlock = input.panel
+        ? await panelSystemBlock(deps, conversation.threadRef, input.panel.persona.id)
+        : "";
+      let systemPrompt = `${modeFrame}\n\n${resolution.systemPrompt}${panelBlock}\n\n${sharedCore}\n\n${renderSecurityPolicyPrompt(securityPolicy)}`;
       const scopeProfile = supportsScopeProfile(deps.sandbox)
         ? await deps.sandbox
             .profileFor(memoryScopeId)
@@ -1929,7 +1962,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               sameHarness &&
               eventsEntitled &&
               participantHistorySeqs === undefined;
-            let fold = eligible ? await rehydrateTape(foldTape(rows)) : undefined;
+            // In a room the tape is folded from the speaking persona's point of view: its own
+            // words stay assistant-role, everyone else's arrive as another speaker.
+            let fold = eligible ? await rehydrateTape(foldTapeForPersona(rows, input.panel?.persona)) : undefined;
             if (eligible && rows.length && fold && tapeNeedsInterruptHeal(rows, fold)) {
               const interrupt = await deps.sessions.appendTape(lease, {
                 kind: "context_event",
@@ -2004,8 +2039,15 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         let firstChunkAt: number | undefined;
         let lastChunkAt: number | undefined;
         const emittedEntries: SessionEntry[] = [];
+        // A panel continuation turn's text is the driver's nudge, not a message anyone sent: it
+        // reaches the harness as the turn input and stops there (see `emit` and `tape` below).
+        const panelContinuation = input.panel?.continuation === true;
         const syntheticPrompt =
-          (input.proactiveOpener && !input.text.trim()) || automatedTurn || partial || approvalReplay;
+          (input.proactiveOpener && !input.text.trim()) ||
+          automatedTurn ||
+          partial ||
+          approvalReplay ||
+          panelContinuation;
         failureUserPayload =
           !syntheticPrompt && input.text.trim()
             ? {
@@ -2072,6 +2114,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             ...(extras.images?.length ? { images: extras.images } : {}),
             ...(input.harness ? { harness: input.harness } : {}),
             ...(input.model ? { model: input.model } : {}),
+            // Adapters stamp this onto the assistant entry payload and the assistant tape row.
+            ...(input.panel ? { persona: input.panel.persona } : {}),
             ...(input.thinkingLevel ? { thinkingLevel: input.thinkingLevel } : {}),
             ...(typeof effectiveFastMode === "boolean" ? { fastMode: effectiveFastMode } : {}),
             ...(strictReadOnly ? { readOnly: true } : {}),
@@ -2166,6 +2210,10 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               if (rec.kind !== "message" || rec.meta?.bareText === undefined) {
                 return withManagedRosterVersion(() => deps.sessions.appendTape(lease, rec));
               }
+              // The trigger row (the one carrying bareText) is the turn input. For a panel
+              // continuation that input is the nudge, so it stays out of the tape too —
+              // otherwise every later persona would read a pile of "it is your turn" prompts.
+              if (panelContinuation) return Promise.resolve(undefined);
               const meta = {
                 ...rec.meta,
                 ...(actor.displayName?.trim() ? { author: actor.displayName.trim() } : {}),
@@ -2174,6 +2222,20 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               return withManagedRosterVersion(() => deps.sessions.appendTape(lease, { ...rec, meta }));
             },
             emit: async (entry) => {
+              if (panelContinuation && entry.type === "user") {
+                // Not persisted: hand the adapter an unsaved stand-in so the code that keys
+                // LLM-request records off the trigger entry keeps working, pointed at the last
+                // real entry rather than at a user message that does not exist.
+                return {
+                  sessionId: session.id,
+                  seq: maxEntrySeq,
+                  parentSeq: null,
+                  type: "user" as const,
+                  payload: entry.payload,
+                  scopeLabel: entry.scopeLabel,
+                  createdAt: Date.now(),
+                };
+              }
               const persistStart = Date.now();
               try {
                 const stored = (() => {
@@ -2353,7 +2415,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                       eventsEntitled &&
                       primarySubturnComplete
                     ) {
-                      const fold = await rehydrateTape(foldTape(rows));
+                      const fold = await rehydrateTape(foldTapeForPersona(rows, input.panel?.persona));
                       if (fold.length && lintFold(fold).ok) return { rows, mode: "serve" as const, fold };
                     }
                     return { rows, mode: "shadow" as const };
