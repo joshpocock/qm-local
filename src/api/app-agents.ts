@@ -11,6 +11,31 @@ import type { AppHelpers } from "./app-helpers.ts";
  * same machinery skills use: the viewer's ordered scopes decide what is listed, and
  * the artifact-home check decides who may edit.
  */
+/**
+ * Personas visible to a principal, in scope order. Exported so the turn pipeline can
+ * validate a request-borne room roster with exactly the semantics the routes use.
+ */
+export async function visiblePersonasFor(deps: AppDeps, h: AppHelpers, principalId: string): Promise<AgentPersona[]> {
+  const actor = deps.identity.classify(principalId);
+  const sharedHomes = [
+    ...new Set(
+      (await deps.personas.list())
+        .map((p) => p.scopeId)
+        .filter((sid) => {
+          const k = parseScopeId(sid).kind;
+          return k === "channel" || k === "group";
+        }),
+    ),
+  ];
+  const accessibleScopes = new Set(await h.currentResourceScopesForViewer(principalId));
+  const shared = sharedHomes.filter((sid) => accessibleScopes.has(sid));
+  const teams = (actor.teamIds ?? []).map((t) => scopeId("team", t));
+  const ordered: ScopeId[] = [
+    ...new Set([scopeId("personal", principalId), ...shared, ...teams, scopeId("org", orgIdOf())]),
+  ];
+  return deps.personas.listForScopes(ordered);
+}
+
 export function createAgentPersonaMethods(
   deps: AppDeps,
   h: AppHelpers,
@@ -18,25 +43,7 @@ export function createAgentPersonaMethods(
   App,
   "listVisiblePersonas" | "getPersona" | "canManagePersona" | "createPersona" | "updatePersona" | "archivePersona"
 > {
-  const { currentResourceScopesForViewer, principalManagesArtifactHome } = h;
-
-  async function orderedScopesFor(principalId: string): Promise<ScopeId[]> {
-    const actor = deps.identity.classify(principalId);
-    const sharedHomes = [
-      ...new Set(
-        (await deps.personas.list())
-          .map((p) => p.scopeId)
-          .filter((sid) => {
-            const k = parseScopeId(sid).kind;
-            return k === "channel" || k === "group";
-          }),
-      ),
-    ];
-    const accessibleScopes = new Set(await currentResourceScopesForViewer(principalId));
-    const shared = sharedHomes.filter((sid) => accessibleScopes.has(sid));
-    const teams = (actor.teamIds ?? []).map((t) => scopeId("team", t));
-    return [...new Set([scopeId("personal", principalId), ...shared, ...teams, scopeId("org", orgIdOf())])];
-  }
+  const { principalManagesArtifactHome } = h;
 
   function canManagePersona(persona: AgentPersona, principalId: string): Promise<boolean> {
     return principalManagesArtifactHome(persona.scopeId, persona.createdBy, principalId);
@@ -44,7 +51,7 @@ export function createAgentPersonaMethods(
 
   return {
     async listVisiblePersonas(principalId) {
-      return deps.personas.listForScopes(await orderedScopesFor(principalId));
+      return visiblePersonasFor(deps, h, principalId);
     },
 
     getPersona(id) {

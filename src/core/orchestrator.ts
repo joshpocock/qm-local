@@ -196,13 +196,18 @@ async function panelSystemBlock(
   deps: Pick<OrchestratorDeps, "personas" | "sessions">,
   threadRef: string,
   personaId: string,
+  rosterIds?: readonly string[],
 ): Promise<string> {
   const personas = deps.personas;
   if (!personas) return "";
   try {
     const speaker = await personas.get(personaId);
     if (!speaker) return "";
-    const room = (await deps.sessions.getByThread(threadRef))?.room;
+    // The driver passes the roster in-band so the very first turn of a brand-new room —
+    // before any session row exists — still introduces every member.
+    const room = rosterIds?.length
+      ? { personaIds: [...rosterIds] }
+      : (await deps.sessions.getByThread(threadRef))?.room;
     const ids = room?.personaIds.length ? room.personaIds : [personaId];
     const roster = (await Promise.all(ids.map((id) => personas.get(id)))).filter(
       (p): p is AgentPersona => !!p && p.archivedAt === undefined,
@@ -828,7 +833,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       // A persona composes directly below the SOUL stack, under the same org-authoritative
       // framing, followed by the roster it is speaking to. Outside rooms this is empty.
       const panelBlock = input.panel
-        ? await panelSystemBlock(deps, conversation.threadRef, input.panel.persona.id)
+        ? await panelSystemBlock(deps, conversation.threadRef, input.panel.persona.id, input.panel.rosterIds)
         : "";
       let systemPrompt = `${modeFrame}\n\n${resolution.systemPrompt}${panelBlock}\n\n${sharedCore}\n\n${renderSecurityPolicyPrompt(securityPolicy)}`;
       const scopeProfile = supportsScopeProfile(deps.sandbox)

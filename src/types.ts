@@ -416,8 +416,16 @@ export interface TurnRequest {
    * Set only by the panel driver: this turn is one persona speaking in a room.
    * `continuation` means the text is the driver's nudge rather than something a human
    * wrote, so it reaches the harness but never lands in the transcript as a user entry.
+   * `rosterIds` carries the panel's full membership so the roster block is right even on
+   * the very first turn, before the session (and its stored room config) exists.
    */
-  panel?: { persona: { id: string; name: string }; continuation: boolean };
+  panel?: { persona: { id: string; name: string }; continuation: boolean; rosterIds?: string[] };
+  /**
+   * A room roster arriving with the message itself — used for the first message of a new
+   * room, where there is no session yet for PUT /v1/sessions/:id/room to target. Validated
+   * like the route (shape, visibility, enabled) and persisted once the session exists.
+   */
+  room?: { personaIds: string[]; rounds: number };
   thinkingLevel?: string;
   fastMode?: boolean;
   readOnly?: boolean;

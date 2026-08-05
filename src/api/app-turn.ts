@@ -26,6 +26,7 @@ import { errMessage } from "../util/errors.ts";
 
 import type { App, AppDeps } from "./app-types.ts";
 import { STALE_LEASE_GRACE_MS } from "./app-types.ts";
+import { visiblePersonasFor } from "./app-agents.ts";
 import { unscreenedNotice } from "../security/security-posture.ts";
 import type { AppHelpers } from "./app-helpers.ts";
 import type { AmbientHelpers } from "./app-ambient.ts";
@@ -65,10 +66,50 @@ export function createTurnMethods(deps: AppDeps, h: AppHelpers, ambient: Ambient
   const activePanels = new Map<string, PanelState>();
 
   /**
-   * Runs a bounded panel for a room. Returns null when the roster has no usable agents left,
-   * which means "fall through and take this turn the ordinary way".
+   * A room config arriving on the request itself (the first message of a freshly minted room —
+   * the session doesn't exist yet, so `PUT /v1/sessions/:id/room` had nothing to attach it to).
+   * Shape and visibility rules are the ones the room route enforces; anything off is a refusal
+   * so the client hears about it instead of silently getting a one-agent conversation.
    */
-  async function runRoomPanel(req: TurnRequest, threadRef: string, room: RoomConfig): Promise<TurnResult | null> {
+  async function roomFromRequest(
+    raw: NonNullable<TurnRequest["room"]>,
+    principalId: string,
+  ): Promise<{ room: RoomConfig } | { error: string }> {
+    const personaIds = raw.personaIds;
+    if (
+      !Array.isArray(personaIds) ||
+      personaIds.length < 1 ||
+      personaIds.length > PANEL_MAX_PERSONAS ||
+      personaIds.some((id) => typeof id !== "string" || !id) ||
+      new Set(personaIds).size !== personaIds.length
+    ) {
+      return { error: `room.personaIds must be 1-${PANEL_MAX_PERSONAS} unique agent ids` };
+    }
+    const rounds = raw.rounds;
+    if (typeof rounds !== "number" || !Number.isInteger(rounds) || rounds < 1 || rounds > 3) {
+      return { error: "room.rounds must be 1-3" };
+    }
+    const visible = new Map((await visiblePersonasFor(deps, h, principalId)).map((p) => [p.id, p] as const));
+    for (const id of personaIds) {
+      const persona = visible.get(id);
+      if (!persona) return { error: `unknown agent: ${id}` };
+      if (!persona.enabled) return { error: `agent ${persona.name} is disabled` };
+    }
+    return { room: { personaIds, rounds: rounds as RoomConfig["rounds"] } };
+  }
+
+  /**
+   * Runs a bounded panel for a room. Returns null when the roster has no usable agents left,
+   * which means "fall through and take this turn the ordinary way". When `persist` is set the
+   * config came in on the request, so it is written to the session as soon as the first persona
+   * turn has created it.
+   */
+  async function runRoomPanel(
+    req: TurnRequest,
+    threadRef: string,
+    room: RoomConfig,
+    persist?: RoomConfig,
+  ): Promise<TurnResult | null> {
     const running = activePanels.get(threadRef);
     if (running) running.abort = true;
 
@@ -76,6 +117,17 @@ export function createTurnMethods(deps: AppDeps, h: AppHelpers, ambient: Ambient
       await Promise.all(room.personaIds.slice(0, PANEL_MAX_PERSONAS).map((id) => deps.personas.get(id))),
     );
     if (!members.length) return null;
+    const rosterIds = members.map((m) => m.id);
+
+    const persistIfNeeded = async (): Promise<void> => {
+      if (!persist) return;
+      try {
+        const session = await deps.sessions.getByThread(threadRef);
+        if (session && !session.room) await deps.sessions.setRoom(session.id, persist);
+      } catch (err) {
+        console.error(`[panel] thread=${threadRef} persisting room config failed: ${errMessage(err)}`);
+      }
+    };
 
     const state: PanelState = { abort: false };
     activePanels.set(threadRef, state);
@@ -95,13 +147,14 @@ export function createTurnMethods(deps: AppDeps, h: AppHelpers, ambient: Ambient
       const next: TurnRequest = {
         ...req,
         text: spec.text,
-        panel: { persona: spec.persona, continuation: spec.continuation },
+        panel: { persona: spec.persona, continuation: spec.continuation, rosterIds },
         harness: spec.harness,
         model: spec.model,
         async,
         // Every persona turn is its own run; sharing the human's key would collapse them into one.
         ...(req.idempotencyKey ? { idempotencyKey: `${req.idempotencyKey}:panel-${spec.index}` } : {}),
       };
+      delete next.room;
       if (spec.continuation) {
         // The human's payload rides along with the first turn only.
         delete next.attachments;
@@ -123,12 +176,15 @@ export function createTurnMethods(deps: AppDeps, h: AppHelpers, ambient: Ambient
           state.abort = true;
           return {};
         }
-        return drive(queued.runId);
+        const driven = await drive(queued.runId);
+        await persistIfNeeded();
+        return driven;
       }
       const result = await methods.turn(personaRequest(spec, false));
       if (spec.index === 0) {
         resolveFirst(result);
         if (result.status === "refused" || result.status === "failed") state.abort = true;
+        else await persistIfNeeded();
       }
       return result;
     };
@@ -498,11 +554,23 @@ export function createTurnMethods(deps: AppDeps, h: AppHelpers, ambient: Ambient
 
       // A human message into a room does not run a turn of its own: it is handed to the first
       // persona, and the driver takes the floor from there. Persona turns come back through
-      // here carrying `panel`, which is what keeps this from recursing.
+      // here carrying `panel`, which is what keeps this from recursing. A roster may also ride
+      // in on the request itself — the first message of a brand-new room, before any session
+      // exists to PUT it onto.
       const personTyped = origin.kind === "human" || origin.kind === "direct";
-      if (agentRoomsEnabled() && !req.panel && !req.approval && known?.room && personTyped) {
-        const panelled = await runRoomPanel(req, conversation.threadRef, known.room);
-        if (panelled) return panelled;
+      if (agentRoomsEnabled() && !req.panel && !req.approval && personTyped) {
+        let roomCfg = known?.room;
+        let persist: RoomConfig | undefined;
+        if (!roomCfg && req.room) {
+          const validated = await roomFromRequest(req.room, actor.id);
+          if ("error" in validated) return { status: "refused", reason: validated.error };
+          roomCfg = validated.room;
+          persist = validated.room;
+        }
+        if (roomCfg) {
+          const panelled = await runRoomPanel(req, conversation.threadRef, roomCfg, persist);
+          if (panelled) return panelled;
+        }
       }
 
       const participants = known ? await deps.sessions.participantsOf(known.id) : [];

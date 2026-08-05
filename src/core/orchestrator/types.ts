@@ -76,6 +76,8 @@ export interface OrchestratorInput extends Omit<
   | "ownerKeychainUnion"
   | "unprompted"
   | "liveActor"
+  // consumed by App.turn's room branch; the orchestrator only ever sees `panel`
+  | "room"
 > {
   surface?: string;
   actor: Principal;

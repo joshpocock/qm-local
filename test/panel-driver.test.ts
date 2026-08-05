@@ -377,3 +377,68 @@ test("a session with no room is untouched by the driver", async () => {
   assert.equal(added.filter((e) => e.type === "assistant").length, 1);
   assert.equal(personaOf(added.find((e) => e.type === "assistant")!), undefined);
 });
+
+test("a first message carrying room config panels immediately and persists the roster", async () => {
+  const built = freshApp();
+  const threadRef = "web:U1:room-first-msg";
+  const scout = await makePersona(built, "Scout");
+  const critic = await makePersona(built, "Critic");
+
+  const result = await built.app.turn({
+    ...webTurn(threadRef, "kick it around, you two"),
+    room: { personaIds: [scout.id, critic.id], rounds: 1 },
+  });
+  assert.notEqual(result.status, "refused", result.reason);
+
+  const session = (await built.sessions.getByThread(threadRef))!;
+  assert.ok(session, "the first persona turn created the session");
+  assert.deepEqual(
+    session.room,
+    { personaIds: [scout.id, critic.id], rounds: 1 },
+    "the request-borne roster was persisted onto the session",
+  );
+
+  const entries = await built.sessions.getEntries(session.id);
+  const users = entries.filter((e) => e.type === "user");
+  const assistants = entries.filter((e) => e.type === "assistant");
+  assert.equal(users.length, 1, "one user entry for the human's message");
+  assert.equal(assistants.length, 2, "both personas spoke on the very first message");
+  assert.deepEqual(
+    assistants.map((e) => personaOf(e)?.name),
+    ["Scout", "Critic"],
+  );
+
+  const followup = await built.app.turn(webTurn(threadRef, "and round two?"));
+  assert.notEqual(followup.status, "refused", followup.reason);
+  const after = await built.sessions.getEntries(session.id);
+  assert.equal(
+    after.filter((e) => e.type === "assistant").length,
+    4,
+    "the persisted roster panels later messages without the request carrying room again",
+  );
+});
+
+test("an invalid request-borne room is refused, not silently degraded", async () => {
+  const built = freshApp();
+  const scout = await makePersona(built, "Scout");
+
+  const unknown = await built.app.turn({
+    ...webTurn("web:U1:room-bad-1", "hi"),
+    room: { personaIds: [scout.id, "ap_nope"], rounds: 1 },
+  });
+  assert.equal(unknown.status, "refused");
+  assert.match(unknown.reason ?? "", /unknown agent/);
+
+  const badRounds = await built.app.turn({
+    ...webTurn("web:U1:room-bad-2", "hi"),
+    room: { personaIds: [scout.id], rounds: 9 },
+  });
+  assert.equal(badRounds.status, "refused");
+  assert.match(badRounds.reason ?? "", /rounds/);
+
+  assert.equal(
+    await built.sessions.getByThread("web:U1:room-bad-1"),
+    null,
+    "a refused first message creates no session",
+  );
+});
