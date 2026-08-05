@@ -6988,6 +6988,30 @@ h3.ambient-field-label {
   opacity: 0.5;
   cursor: default;
 }
+/* The row is the checkbox, so it needs to look like one: without a visible box
+   nothing says "pick these first" and the disabled Start button reads as broken. */
+.room-pick-box {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: 1px solid color-mix(in srgb, var(--foreground) 35%, var(--border));
+  border-radius: 4px;
+  color: var(--background);
+  font-size: 11px;
+  line-height: 1;
+}
+.room-pick.selected .room-pick-box {
+  border-color: var(--foreground);
+  background: var(--foreground);
+}
+.room-hint {
+  margin: 8px 0 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
 .room-pick-copy {
   display: flex;
   flex-direction: column;

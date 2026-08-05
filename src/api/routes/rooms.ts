@@ -1,5 +1,5 @@
 import { agentRoomsEnabled } from "../../config.ts";
-import { ROOM_MAX_PERSONAS, ROOM_MAX_ROUNDS, type RoomConfig } from "../../types.ts";
+import { ROOM_MAX_ROUNDS, type RoomConfig } from "../../types.ts";
 import { sendJson } from "../http.ts";
 import { type ApiCtx, type Route } from "./route.ts";
 
@@ -35,15 +35,10 @@ async function putSessionRoom(ctx: ApiCtx): Promise<void> {
       return sendJson(res, 400, { error: "bad_request", message: "room must be an object or null" });
     }
     const personaIds = raw.personaIds;
-    if (
-      !Array.isArray(personaIds) ||
-      personaIds.length < 1 ||
-      personaIds.length > ROOM_MAX_PERSONAS ||
-      personaIds.some((id) => typeof id !== "string" || !id)
-    ) {
+    if (!Array.isArray(personaIds) || personaIds.length < 1 || personaIds.some((id) => typeof id !== "string" || !id)) {
       return sendJson(res, 400, {
         error: "bad_request",
-        message: `room.personaIds must be 1-${ROOM_MAX_PERSONAS} agent ids`,
+        message: "room.personaIds must be one or more agent ids",
       });
     }
     if (new Set(personaIds as string[]).size !== personaIds.length) {

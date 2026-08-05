@@ -36,7 +36,6 @@ export interface PersonaChip {
 }
 
 export const MIN_ROOM_PERSONAS = 1;
-export const MAX_ROOM_PERSONAS = 4;
 export const ROOM_ROUNDS: ReadonlyArray<1 | 2 | 3> = [1, 2, 3];
 export const DEFAULT_ROOM_ROUNDS: 1 | 2 | 3 = 1;
 
@@ -44,21 +43,18 @@ export function roomConfigError(config: { personaIds: readonly string[]; rounds:
   const unique = new Set(config.personaIds);
   if (unique.size !== config.personaIds.length) return "Each agent can only be in the room once.";
   if (config.personaIds.length < MIN_ROOM_PERSONAS) return "Pick at least one agent.";
-  if (config.personaIds.length > MAX_ROOM_PERSONAS) return `A room holds at most ${MAX_ROOM_PERSONAS} agents.`;
   if (!ROOM_ROUNDS.includes(config.rounds as 1 | 2 | 3)) return "Rounds must be 1, 2, or 3.";
   return null;
 }
 
-/** Roster multi-select: toggles membership, refusing to grow past the cap. */
+/** Roster multi-select: order of selection is the order they speak. There is no size cap. */
 export function toggleRosterMember(personaIds: readonly string[], id: string): string[] {
   if (personaIds.includes(id)) return personaIds.filter((existing) => existing !== id);
-  if (personaIds.length >= MAX_ROOM_PERSONAS) return [...personaIds];
   return [...personaIds, id];
 }
 
-export function canAddToRoster(personaIds: readonly string[], agent: AgentItem): boolean {
-  if (!agent.enabled) return false;
-  return personaIds.includes(agent.id) || personaIds.length < MAX_ROOM_PERSONAS;
+export function canAddToRoster(_personaIds: readonly string[], agent: AgentItem): boolean {
+  return agent.enabled;
 }
 
 // ---------------------------------------------------------------------------

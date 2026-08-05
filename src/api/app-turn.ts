@@ -1,12 +1,6 @@
 import type { Conversation, Principal, RoomConfig, TurnRequest, TurnResult } from "../types.ts";
 import { agentRoomsEnabled, orgId as orgIdOf } from "../config.ts";
-import {
-  PANEL_MAX_PERSONAS,
-  panelMembersFrom,
-  runPanel,
-  type PanelState,
-  type PanelTurnSpec,
-} from "../agents/panel-driver.ts";
+import { panelMembersFrom, runPanel, type PanelState, type PanelTurnSpec } from "../agents/panel-driver.ts";
 import { scopeId } from "../types.ts";
 import { isHalt, routeWake, type Wake } from "../wake/wake.ts";
 import type { OrchestratorInput } from "../core/orchestrator.ts";
@@ -79,11 +73,10 @@ export function createTurnMethods(deps: AppDeps, h: AppHelpers, ambient: Ambient
     if (
       !Array.isArray(personaIds) ||
       personaIds.length < 1 ||
-      personaIds.length > PANEL_MAX_PERSONAS ||
       personaIds.some((id) => typeof id !== "string" || !id) ||
       new Set(personaIds).size !== personaIds.length
     ) {
-      return { error: `room.personaIds must be 1-${PANEL_MAX_PERSONAS} unique agent ids` };
+      return { error: "room.personaIds must be one or more unique agent ids" };
     }
     const rounds = raw.rounds;
     if (typeof rounds !== "number" || !Number.isInteger(rounds) || rounds < 1 || rounds > 3) {
@@ -113,9 +106,7 @@ export function createTurnMethods(deps: AppDeps, h: AppHelpers, ambient: Ambient
     const running = activePanels.get(threadRef);
     if (running) running.abort = true;
 
-    const members = panelMembersFrom(
-      await Promise.all(room.personaIds.slice(0, PANEL_MAX_PERSONAS).map((id) => deps.personas.get(id))),
-    );
+    const members = panelMembersFrom(await Promise.all(room.personaIds.map((id) => deps.personas.get(id))));
     if (!members.length) return null;
     const rosterIds = members.map((m) => m.id);
 

@@ -17,7 +17,6 @@ import {
   cachePersonas,
   clearPendingRoom,
   DEFAULT_ROOM_ROUNDS,
-  MAX_ROOM_PERSONAS,
   pendingRoomFor,
   personaChipFor,
   roomConfigError,
@@ -167,8 +166,7 @@ function submitRoom(): void {
 
 function agentRosterRow(agent: AgentItem): TemplateResult {
   const selected = dialogState.personaIds.includes(agent.id);
-  const full = !selected && dialogState.personaIds.length >= MAX_ROOM_PERSONAS;
-  const disabled = !agent.enabled || full;
+  const disabled = !agent.enabled;
   let hint = `${agent.harnessId} · ${agent.modelId}`;
   if (!agent.enabled) hint = "Disabled — enable it on the Agents page to use it in a room";
   return html`<button
@@ -184,6 +182,7 @@ function agentRosterRow(agent: AgentItem): TemplateResult {
       drawRoomDialog();
     }}
   >
+    <span class="room-pick-box" aria-hidden="true">${selected ? "✓" : ""}</span>
     <span class="persona-dot" style=${`--persona-color: ${agent.color};`}>${agent.glyph}</span>
     <span class="room-pick-copy">
       <span class="room-pick-name">@${agent.name}</span>
@@ -200,8 +199,13 @@ function rosterBody(): TemplateResult {
     return html`<p class="room-empty">No agents yet. Create one on the Agents page, then start a room.</p>`;
   }
   return html`<div class="room-pick-list" role="group" aria-label="Agents in this room">
-    ${dialogState.agents.map(agentRosterRow)}
-  </div>`;
+      ${dialogState.agents.map(agentRosterRow)}
+    </div>
+    ${
+      dialogState.personaIds.length
+        ? nothing
+        : html`<p class="room-hint">Select the agents above to start the room.</p>`
+    }`;
 }
 
 function roomDialogTpl(): TemplateResult {
@@ -235,8 +239,8 @@ function roomDialogTpl(): TemplateResult {
           </button>
         </div>
         <p class="room-dialog-lead">
-          Pick up to ${MAX_ROOM_PERSONAS} agents. Each takes a turn in roster order when you send a message, and can
-          @mention another agent to hand it a follow-up turn.
+          Pick your agents. Each takes a turn in roster order when you send a message, and can @mention another agent to
+          hand it a follow-up turn.
         </p>
         ${rosterBody()}
         <label class="room-rounds-field">

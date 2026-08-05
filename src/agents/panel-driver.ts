@@ -1,13 +1,14 @@
 import type { AgentPersona } from "./persona-store.ts";
 
 /**
- * Hard ceiling on persona turns in one panel. Rounds and mention grants are both bounded,
- * but this is the number that makes the loop terminate no matter what the models say.
+ * The panel is self-limiting: every member speaks once per round, and a member can be
+ * granted at most one extra turn per round by being @mentioned. So a panel can never
+ * exceed `members x rounds x 2` turns however the models behave — no fixed cap needed,
+ * and a room may hold as many agents as the operator wants.
  */
-export const PANEL_MAX_TURNS = 6;
-
-/** Rooms cap at four voices (D2); the driver enforces it again in case a stale room config is larger. */
-export const PANEL_MAX_PERSONAS = 4;
+export function panelTurnCeiling(memberCount: number, rounds: number): number {
+  return Math.max(1, memberCount) * Math.max(1, rounds) * 2;
+}
 
 /** Delivered as the turn input for every persona turn after the first, and never persisted as a user entry. */
 export const PANEL_CONTINUATION_NUDGE =
@@ -54,7 +55,6 @@ export interface PanelRunOptions {
 export function panelMembersFrom(personas: ReadonlyArray<AgentPersona | null | undefined>): PanelMember[] {
   return personas
     .filter((p): p is AgentPersona => !!p && p.enabled && p.archivedAt === undefined)
-    .slice(0, PANEL_MAX_PERSONAS)
     .map((p) => ({ id: p.id, name: p.name, harnessId: p.harnessId, modelId: p.modelId }));
 }
 
@@ -90,12 +90,13 @@ export function panelMentions(reply: string | undefined, roster: readonly string
  */
 export async function runPanel(o: PanelRunOptions): Promise<void> {
   const roster = o.members.map((m) => m.name);
+  const ceiling = panelTurnCeiling(o.members.length, o.rounds);
   let index = 0;
   for (let round = 1; round <= o.rounds; round += 1) {
     const queue: PanelMember[] = [...o.members];
     const grantedThisRound = new Set<string>();
     for (let i = 0; i < queue.length; i += 1) {
-      if (o.state.abort || index >= PANEL_MAX_TURNS) return;
+      if (o.state.abort || index >= ceiling) return;
       const member = queue[i]!;
       const spec: PanelTurnSpec = {
         persona: { id: member.id, name: member.name },

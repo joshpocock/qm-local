@@ -17,7 +17,7 @@ import type { RoomConfig, SessionEntry, TurnRequest } from "../src/types.ts";
 import type { AgentPersona } from "../src/agents/persona-store.ts";
 import {
   PANEL_CONTINUATION_NUDGE,
-  PANEL_MAX_TURNS,
+  panelTurnCeiling,
   PANEL_PASS,
   isPanelPass,
   panelMembersFrom,
@@ -103,11 +103,15 @@ test("a mention grants at most one bonus turn per agent per round, and never to 
   );
 });
 
-test("a mention chain stops at PANEL_MAX_TURNS", async () => {
+test("a mention chain stops at the computed turn ceiling", async () => {
   const s = scripted({ Alfa: "@Bravo keep going", Bravo: "@Alfa keep going" });
   await runPanel({ members: [ALICE, BRAVO], rounds: 3, text: "go", state: { abort: false }, run: s.run });
 
-  assert.equal(s.taken.length, PANEL_MAX_TURNS, "the hard cap, not the round count, is what ends this panel");
+  assert.equal(
+    s.taken.length,
+    panelTurnCeiling(2, 3),
+    "members x rounds x 2 (one bonus turn each per round) is what ends this panel",
+  );
 });
 
 test("a reply of exactly PASS grants nothing", async () => {
@@ -150,7 +154,7 @@ test("the abort flag stops the queue between persona turns", async () => {
   assert.deepEqual(taken, ["Alfa"], "the running turn finishes, then the queue stops");
 });
 
-test("panelMembersFrom drops disabled, archived, and missing agents and caps the roster at four", () => {
+test("panelMembersFrom drops disabled, archived, and missing agents and never caps the roster", () => {
   const persona = (over: Partial<AgentPersona>): AgentPersona => ({
     id: "ap_x",
     scopeId: "personal:U1",
@@ -177,7 +181,7 @@ test("panelMembersFrom drops disabled, archived, and missing agents and caps the
     members.map((m) => m.name),
     ["One", "Four"],
   );
-  assert.equal(panelMembersFrom(Array.from({ length: 9 }, () => persona({}))).length, 4);
+  assert.equal(panelMembersFrom(Array.from({ length: 9 }, () => persona({}))).length, 9);
 });
 
 // ---------------------------------------------------------------------------

@@ -65,12 +65,11 @@ export type SessionType = "dm" | "channel" | "group";
  * always has" — every room-only code path is keyed off this being present.
  */
 export interface RoomConfig {
-  /** 1-4 persona ids, in the order they speak */
+  /** persona ids, in the order they speak; a room may hold as many as you like */
   personaIds: string[];
   rounds: 1 | 2 | 3;
 }
 
-export const ROOM_MAX_PERSONAS = 4;
 export const ROOM_MAX_ROUNDS = 3;
 
 export interface Session {

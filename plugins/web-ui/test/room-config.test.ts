@@ -14,7 +14,6 @@ import {
   clearPersonaCache,
   holdPendingRoom,
   isRoomThread,
-  MAX_ROOM_PERSONAS,
   noteRoom,
   pendingRoomFor,
   clearPendingRoom,
@@ -58,22 +57,25 @@ function makeAgent(id: string, name: string, over: Partial<AgentItem> = {}): Age
 // Roster rules
 // ---------------------------------------------------------------------------
 
-test("a roster holds 1-4 unique agents over 1-3 rounds", () => {
+test("a roster holds one or more unique agents over 1-3 rounds, with no size cap", () => {
   assert.equal(roomConfigError({ personaIds: ["a"], rounds: 1 }), null);
   assert.equal(roomConfigError({ personaIds: ["a", "b", "c", "d"], rounds: 3 }), null);
+  assert.equal(
+    roomConfigError({ personaIds: Array.from({ length: 12 }, (_, i) => `p${i}`), rounds: 1 }),
+    null,
+    "a room may hold as many agents as the operator wants",
+  );
   assert.ok(roomConfigError({ personaIds: [], rounds: 1 }), "an empty roster is not a room");
-  assert.ok(roomConfigError({ personaIds: ["a", "b", "c", "d", "e"], rounds: 1 }), "past the cap");
   assert.ok(roomConfigError({ personaIds: ["a", "a"], rounds: 1 }), "an agent cannot be in a room twice");
   assert.ok(roomConfigError({ personaIds: ["a"], rounds: 0 }));
   assert.ok(roomConfigError({ personaIds: ["a"], rounds: 4 }));
 });
 
-test("toggling roster membership preserves order and refuses to grow past the cap", () => {
+test("toggling roster membership preserves order and never refuses a pick", () => {
   let ids: string[] = [];
-  for (const id of ["a", "b", "c", "d"]) ids = toggleRosterMember(ids, id);
-  assert.deepEqual(ids, ["a", "b", "c", "d"], "picks keep the order they were made in");
-  assert.deepEqual(toggleRosterMember(ids, "e"), ids, `a fifth pick is refused at ${MAX_ROOM_PERSONAS}`);
-  assert.deepEqual(toggleRosterMember(ids, "b"), ["a", "c", "d"], "deselecting always works, full or not");
+  for (const id of ["a", "b", "c", "d", "e", "f", "g"]) ids = toggleRosterMember(ids, id);
+  assert.deepEqual(ids, ["a", "b", "c", "d", "e", "f", "g"], "picks keep the order they were made in");
+  assert.deepEqual(toggleRosterMember(ids, "b"), ["a", "c", "d", "e", "f", "g"], "deselecting always works");
 });
 
 // ---------------------------------------------------------------------------
