@@ -424,7 +424,7 @@ function runArgs(ctx: DockerCtx, service: ServiceName, image: string): { args: s
     const principal = env.PORTAL_DEV_PRINCIPAL ?? firstAdminGrant(ctx);
     if (principal) args.push("-e", `PORTAL_DEV_PRINCIPAL=${principal}`);
     note(
-      `sign-in: local bypass on (as ${principal ?? "the default dev principal"}), portal bound to 127.0.0.1; ` +
+      `sign-in: local bypass on (as ${principal ?? "the default dev principal"}), portal bound to loopback only; ` +
         `set QM_NO_LOCAL_AUTH_BYPASS=1 for the real sign-in flow`,
     );
   }
@@ -463,11 +463,18 @@ function runArgs(ctx: DockerCtx, service: ServiceName, image: string): { args: s
   }
   if (def.docker.hostPortOffset !== undefined) {
     const hostPort = baseHostPort(ctx) + def.docker.hostPortOffset;
-    // Binding to 127.0.0.1 is what keeps the auth bypass a this-machine-only
-    // affair; docker's default 0.0.0.0 would expose an unauthenticated portal
-    // to the whole LAN.
-    const bind = service === "portal" && localAuthBypassEnabled(env) ? "127.0.0.1:" : "";
-    args.push("-p", `${bind}${hostPort}:${def.docker.internalPort}`);
+    if (service === "portal" && localAuthBypassEnabled(env)) {
+      // Restricting the portal to loopback is what keeps the auth bypass a
+      // this-machine-only affair; docker's default 0.0.0.0 would put an
+      // unauthenticated portal on the LAN. Bind BOTH loopback stacks: Windows
+      // and modern Linux resolve "localhost" to ::1 first, so an IPv4-only
+      // bind leaves the browser's requests refused on the address it actually
+      // dials.
+      args.push("-p", `127.0.0.1:${hostPort}:${def.docker.internalPort}`);
+      args.push("-p", `[::1]:${hostPort}:${def.docker.internalPort}`);
+    } else {
+      args.push("-p", `${hostPort}:${def.docker.internalPort}`);
+    }
   }
   args.push(image);
   return { args, cleanup };
