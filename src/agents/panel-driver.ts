@@ -45,7 +45,14 @@ export interface PanelTurnSpec {
 }
 
 export interface PanelRunOptions {
+  /** Who takes a turn each round, in the order they take it. */
   members: readonly PanelMember[];
+  /**
+   * The pool an `@mention` may invite a bonus turn from. Defaults to `members`. When the human
+   * addressed only part of the room, `members` is that subset while `invitable` stays the whole
+   * roster, so an agent that was not tagged can still be pulled in by one that was.
+   */
+  invitable?: readonly PanelMember[];
   rounds: number;
   /** the human's message; delivered by the first persona turn so the user entry is emitted once */
   text: string;
@@ -69,30 +76,60 @@ function escapeForRegex(s: string): string {
 }
 
 /**
- * Names of OTHER roster members this reply invited with `@Name`. Case-insensitive, and the
- * token must end at a non-name character so `@Scoutmaster` does not summon `Scout`. A persona
- * cannot mention itself into another turn.
+ * Offset of the first `@Name` token in `text`, or -1. Case-insensitive, and the token must end
+ * at a non-name character so `@Scoutmaster` does not summon `Scout`. The one matcher every
+ * caller goes through — agents mentioning each other and humans addressing the room alike.
  */
-export function panelMentions(reply: string | undefined, roster: readonly string[], selfName: string): string[] {
+function mentionAt(text: string, name: string): number {
+  return text.search(new RegExp(`@${escapeForRegex(name)}(?![A-Za-z0-9-])`, "i"));
+}
+
+/**
+ * Names of roster members this text invited with `@Name`, in roster order. A persona cannot
+ * mention itself into another turn, hence `selfName`; omit it when the speaker is the human,
+ * who is not on the roster and so excludes nobody.
+ */
+export function panelMentions(reply: string | undefined, roster: readonly string[], selfName?: string): string[] {
   const text = reply ?? "";
   if (!text.includes("@")) return [];
   const hit: string[] = [];
   for (const name of roster) {
-    if (name.toLowerCase() === selfName.toLowerCase()) continue;
-    const re = new RegExp(`@${escapeForRegex(name)}(?![A-Za-z0-9-])`, "i");
-    if (re.test(text)) hit.push(name);
+    if (selfName !== undefined && name.toLowerCase() === selfName.toLowerCase()) continue;
+    if (mentionAt(text, name) >= 0) hit.push(name);
   }
   return hit;
 }
 
 /**
- * Runs one bounded panel: roster order per round, plus at most one bonus turn per persona per
- * round for being @mentioned. Sequential by construction — each `run` is one ordinary turn that
+ * The room members a human addressed with `@Name`, in the order the tags appear in the text —
+ * "@Scout, then @Critic" speaks in that order however the roster is ordered. A tag naming
+ * someone outside `members` (not in this room, or already dropped for being disabled or
+ * archived) matches nothing and is ignored. An empty result means nobody in particular was
+ * addressed, which callers read as "the whole room speaks".
+ */
+export function panelAddressed(text: string | undefined, members: readonly PanelMember[]): PanelMember[] {
+  const body = text ?? "";
+  if (!body.includes("@")) return [];
+  return members
+    .map((member, order) => ({ member, order, at: mentionAt(body, member.name) }))
+    .filter((hit) => hit.at >= 0)
+    .sort((a, b) => a.at - b.at || a.order - b.order)
+    .map((hit) => hit.member);
+}
+
+/**
+ * Runs one bounded panel: `members` order per round, plus at most one bonus turn per persona per
+ * round for being @mentioned (invited from `invitable`, which is the whole room even when only
+ * part of it was addressed). Sequential by construction — each `run` is one ordinary turn that
  * takes and releases the per-session lease — so there is no concurrency control here on purpose.
  */
 export async function runPanel(o: PanelRunOptions): Promise<void> {
-  const roster = o.members.map((m) => m.name);
-  const ceiling = panelTurnCeiling(o.members.length, o.rounds);
+  const invitable = o.invitable ?? o.members;
+  const roster = invitable.map((m) => m.name);
+  // The speaking set is what runs each round, but a mention can invite anyone from the wider
+  // pool, so the budget is taken from whichever is larger: a message addressed to one agent of
+  // three still has room for the agent it pulls in.
+  const ceiling = panelTurnCeiling(Math.max(o.members.length, invitable.length), o.rounds);
   let index = 0;
   for (let round = 1; round <= o.rounds; round += 1) {
     const queue: PanelMember[] = [...o.members];
@@ -136,7 +173,7 @@ export async function runPanel(o: PanelRunOptions): Promise<void> {
         continue;
       }
       for (const name of panelMentions(reply, roster, member.name)) {
-        const invited = o.members.find((m) => m.name.toLowerCase() === name.toLowerCase());
+        const invited = invitable.find((m) => m.name.toLowerCase() === name.toLowerCase());
         if (!invited || grantedThisRound.has(invited.id)) continue;
         grantedThisRound.add(invited.id);
         queue.push(invited);

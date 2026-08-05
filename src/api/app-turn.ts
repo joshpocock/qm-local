@@ -7,7 +7,13 @@ import {
   type TurnResult,
 } from "../types.ts";
 import { agentRoomsEnabled, orgId as orgIdOf } from "../config.ts";
-import { panelMembersFrom, runPanel, type PanelState, type PanelTurnSpec } from "../agents/panel-driver.ts";
+import {
+  panelAddressed,
+  panelMembersFrom,
+  runPanel,
+  type PanelState,
+  type PanelTurnSpec,
+} from "../agents/panel-driver.ts";
 import { scopeId } from "../types.ts";
 import { isHalt, routeWake, type Wake } from "../wake/wake.ts";
 import type { OrchestratorInput } from "../core/orchestrator.ts";
@@ -115,7 +121,14 @@ export function createTurnMethods(deps: AppDeps, h: AppHelpers, ambient: Ambient
 
     const members = panelMembersFrom(await Promise.all(room.personaIds.map((id) => deps.personas.get(id))));
     if (!members.length) return null;
+    // The room's roster is what every persona turn is told about; it never changes with a message.
     const rosterIds = members.map((m) => m.id);
+    // Addressing the room with `@Name` picks who answers THIS message, in the order tagged.
+    // Tags for agents outside the room match nothing, so a message that tags only strangers
+    // falls back to the whole roster, exactly like a message with no tags at all. Whoever
+    // speaks may still invite anyone else in the room with a mention of their own.
+    const addressed = panelAddressed(req.text, members);
+    const speaking = addressed.length ? addressed : members;
 
     const persistIfNeeded = async (): Promise<void> => {
       if (!persist) return;
@@ -204,7 +217,7 @@ export function createTurnMethods(deps: AppDeps, h: AppHelpers, ambient: Ambient
       return result;
     };
 
-    const panel = runPanel({ members, rounds: room.rounds, text: req.text, state, run })
+    const panel = runPanel({ members: speaking, invitable: members, rounds: room.rounds, text: req.text, state, run })
       .catch((err) => {
         console.error(`[panel] thread=${threadRef} ${errMessage(err)}`);
       })

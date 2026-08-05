@@ -20,6 +20,7 @@ import {
   panelTurnCeiling,
   PANEL_PASS,
   isPanelPass,
+  panelAddressed,
   panelMembersFrom,
   panelMentions,
   renderPanelSystemBlock,
@@ -256,6 +257,108 @@ test("mention matching is case-insensitive and respects name boundaries", () => 
   assert.deepEqual(panelMentions(undefined, roster, "Alfa"), []);
 });
 
+// ---------------------------------------------------------------------------
+// @tagging: the human picks who answers this one message.
+// ---------------------------------------------------------------------------
+
+/** What app-turn does with a human message: tags pick the speakers, no tags means everyone. */
+function speakersFor(text: string, members: readonly PanelMember[]): readonly PanelMember[] {
+  const addressed = panelAddressed(text, members);
+  return addressed.length ? addressed : members;
+}
+
+async function panelForHuman(text: string, members: readonly PanelMember[], replies: Record<string, string> = {}) {
+  const s = scripted(replies);
+  await runPanel({
+    members: speakersFor(text, members),
+    invitable: members,
+    rounds: 1,
+    text,
+    state: { abort: false },
+    run: s.run,
+  });
+  return s.taken.map((t) => t.persona.name);
+}
+
+const ROOM = [ALICE, BRAVO, CHARLIE];
+
+test("a human message that @tags one agent is answered by that agent alone", async () => {
+  assert.deepEqual(await panelForHuman("@Bravo does this pricing table read right?", ROOM), ["Bravo"]);
+});
+
+test("two @tags run exactly those two, in the order the human tagged them", async () => {
+  assert.deepEqual(
+    await panelForHuman("@Charlie first, then @Alfa", ROOM),
+    ["Charlie", "Alfa"],
+    "tag order, not roster order",
+  );
+  assert.deepEqual(await panelForHuman("@Alfa first, then @Charlie", ROOM), ["Alfa", "Charlie"]);
+});
+
+test("a tag for someone outside the room is ignored, and a message of only those runs the whole room", async () => {
+  assert.deepEqual(await panelForHuman("@Delta and @Bravo, thoughts?", ROOM), ["Bravo"], "the stranger is dropped");
+  assert.deepEqual(
+    await panelForHuman("@Delta @Echo anyone?", ROOM),
+    ["Alfa", "Bravo", "Charlie"],
+    "no tag matched, so nobody was addressed in particular",
+  );
+
+  const live = panelMembersFrom([
+    fakePersona({ id: "ap_1", name: "Awake" }),
+    fakePersona({ id: "ap_2", name: "Dormant", enabled: false }),
+    fakePersona({ id: "ap_3", name: "Filed", archivedAt: 2 }),
+  ]);
+  assert.deepEqual(panelAddressed("@Dormant @Filed you two", live), [], "a disabled or archived tag matches nothing");
+  assert.deepEqual(await panelForHuman("@Dormant you two", live), ["Awake"], "and falls back to the room");
+});
+
+test("an untagged human message still runs the whole roster, in roster order", async () => {
+  assert.deepEqual(panelAddressed("what do you all make of this?", ROOM), []);
+  assert.deepEqual(await panelForHuman("what do you all make of this?", ROOM), ["Alfa", "Bravo", "Charlie"]);
+});
+
+test("a tagged agent can still pull an untagged room member into the round", async () => {
+  assert.deepEqual(
+    await panelForHuman("@Alfa take this one", ROOM, { Alfa: "@Charlie you saw this last week, no?" }),
+    ["Alfa", "Charlie"],
+    "the mention pool is the whole room even when only part of it was addressed",
+  );
+});
+
+test("human tags are case-insensitive and respect name boundaries", () => {
+  const named = (members: readonly PanelMember[]) => members.map((m) => m.name);
+  assert.deepEqual(named(panelAddressed("hey @bravo", ROOM)), ["Bravo"]);
+  assert.deepEqual(named(panelAddressed("@BRAVO", ROOM)), ["Bravo"]);
+  assert.deepEqual(panelAddressed("@Bravos are plural", ROOM), [], "no partial-name summons");
+  assert.deepEqual(panelAddressed("mail bravo@example.com", ROOM), [], "an address is not a tag");
+  assert.deepEqual(panelAddressed("no tags here", ROOM), []);
+  assert.deepEqual(panelAddressed(undefined, ROOM), []);
+
+  const scout: PanelMember = { id: "ap_s", name: "Scout", harnessId: "mock", modelId: "claude-opus-4-8" };
+  const master: PanelMember = { id: "ap_m", name: "Scoutmaster", harnessId: "mock", modelId: "claude-opus-4-8" };
+  assert.deepEqual(named(panelAddressed("@Scoutmaster your call", [scout, master])), ["Scoutmaster"]);
+  assert.deepEqual(named(panelAddressed("@Scout your call", [scout, master])), ["Scout"]);
+});
+
+test("a one-agent speaking set still has budget for the agents it invites", async () => {
+  // The ceiling comes from the larger of the speaking set and the invitable pool, so a message
+  // addressed to one agent of three is not capped at that one agent's own turns.
+  const s = scripted({ Alfa: "@Bravo @Charlie you two should weigh in" });
+  await runPanel({
+    members: [ALICE],
+    invitable: ROOM,
+    rounds: 1,
+    text: "@Alfa start us off",
+    state: { abort: false },
+    run: s.run,
+  });
+  assert.deepEqual(
+    s.taken.map((t) => t.persona.name),
+    ["Alfa", "Bravo", "Charlie"],
+  );
+  assert.equal(panelTurnCeiling(1, 1), 2, "the speaking set alone would have cut Charlie off");
+});
+
 test("the abort flag stops the queue between persona turns", async () => {
   const state = { abort: false };
   const taken: string[] = [];
@@ -375,6 +478,53 @@ test("a human message into a two-agent room runs exactly two persona turns, attr
     String((e.payload as { text?: string }).text ?? "").includes("your turn to speak"),
   );
   assert.equal(nudges.length, 0, "the continuation nudge never lands in the transcript as a user message");
+});
+
+test("a human message that @tags one agent of a two-agent room is answered by that agent alone", async () => {
+  const built = freshApp();
+  const threadRef = "web:U1:room-tagged";
+  const { session, personas } = await openRoom(built, threadRef, (ids) => ({ personaIds: ids, rounds: 1 }), [
+    "Scout",
+    "Critic",
+  ]);
+
+  const before = await built.sessions.getEntries(session.id);
+  const result = await built.app.turn(webTurn(threadRef, "@Critic what is wrong with the pricing page?"));
+  assert.notEqual(result.status, "refused", result.reason);
+
+  const added = (await built.sessions.getEntries(session.id)).filter((e) => e.seq > (before.at(-1)?.seq ?? -1));
+  const users = added.filter((e) => e.type === "user");
+  const assistants = added.filter((e) => e.type === "assistant");
+
+  assert.equal(users.length, 1, "still one user entry for the human's message");
+  assert.equal(
+    (users[0]!.payload as { text?: string }).text,
+    "@Critic what is wrong with the pricing page?",
+    "and it keeps the tag the human typed",
+  );
+  assert.equal(assistants.length, 1, "only the tagged agent took a turn");
+  assert.deepEqual(
+    assistants.map((e) => personaOf(e)?.name),
+    ["Critic"],
+  );
+  assert.equal(personaOf(assistants[0]!)?.id, personas[1]!.id);
+
+  assert.deepEqual(
+    (await built.sessions.get(session.id))!.room,
+    { personaIds: personas.map((p) => p.id), rounds: 1 },
+    "tagging is per message; the stored roster is untouched",
+  );
+
+  const untagged = await built.app.turn(webTurn(threadRef, "and both of you on the copy?"));
+  assert.notEqual(untagged.status, "refused", untagged.reason);
+  const laterAssistants = (await built.sessions.getEntries(session.id))
+    .filter((e) => e.seq > (added.at(-1)?.seq ?? -1))
+    .filter((e) => e.type === "assistant");
+  assert.deepEqual(
+    laterAssistants.map((e) => personaOf(e)?.name),
+    ["Scout", "Critic"],
+    "the next untagged message runs the whole room again",
+  );
 });
 
 test("a two-round room tells each persona turn where in the panel it is", async () => {
