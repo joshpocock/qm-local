@@ -14,6 +14,7 @@ import {
   Plus,
   RefreshCw,
   Rocket,
+  Users,
   type IconNode,
 } from "lucide";
 import "@mariozechner/mini-lit/dist/ThemeToggle.js";
@@ -62,6 +63,9 @@ import { clearConnectorNotice, noteConnectorResult, renderConnectors, resetKeych
 import { renderDeploys } from "./deploys";
 import { renderMemory, resetMemoryState } from "./memory";
 import { renderSkills } from "./skills";
+import { renderAgents, resetAgentsState } from "./agents";
+import { openRoomDialog } from "./rooms";
+import { holdPendingRoom, resetRoomState } from "./room-state";
 import { contextsState, ensureContexts, renderContexts, resetContextsState, resolveProjectScope } from "./contexts";
 import { appState, isView, type AuthMode, type Me, type View } from "./shell-state";
 import { trapDialogFocus } from "./dialog-focus";
@@ -179,6 +183,8 @@ const ICON = {
   crons: Clock,
   memory: Brain,
   skills: Box,
+  agents: Users,
+  newRoom: Users,
 };
 
 export async function signOut(): Promise<void> {
@@ -200,6 +206,8 @@ export async function signOut(): Promise<void> {
   resetMemoryState();
   resetContextsState();
   resetKeychainState();
+  resetAgentsState();
+  resetRoomState();
   mainConversation().composer.resetComposer();
   if (!portal) {
     renderAuthGate({ kind: "dev" });
@@ -480,6 +488,20 @@ export function mountShell(): void {
   shellMounted = true;
 }
 
+/**
+ * Mints a thread the same way "New chat" does, then parks the chosen roster against it.
+ * A web thread has no server-side session until its first message lands, so the roster
+ * cannot be PUT here — `applyPendingRoom` sends it the moment the session id appears.
+ */
+function startNewRoom(): void {
+  openRoomDialog((config) => {
+    closeSidebarOnNarrowView();
+    const threadRef = mainConversation().newChat();
+    holdPendingRoom(threadRef, config);
+    mainConversation().redraw();
+  });
+}
+
 export function renderSidebarTop(): void {
   if (!appState.topEl) return;
   const navRow = (v: View, glyph: IconNode, label: string) =>
@@ -509,16 +531,27 @@ export function renderSidebarTop(): void {
   `;
   render(
     html`
-      <button
-        class="new-chat"
-        title=${splitState.active ? "New session" : "New chat"}
-        @click=${() => {
-          closeSidebarOnNarrowView();
-          if (!addBlankPane()) mainConversation().newChat();
-        }}
-      >
-        ${icon(ICON.newChat, 17)}<span>${splitState.active ? "New session" : "New chat"}</span>
-      </button>
+      <div class="new-chat-split">
+        <button
+          class="new-chat"
+          title=${splitState.active ? "New session" : "New chat"}
+          @click=${() => {
+            closeSidebarOnNarrowView();
+            if (!addBlankPane()) mainConversation().newChat();
+          }}
+        >
+          ${icon(ICON.newChat, 17)}<span>${splitState.active ? "New session" : "New chat"}</span>
+        </button>
+        <button
+          class="new-room"
+          type="button"
+          title="New room — several agents in one conversation"
+          aria-label="New room"
+          @click=${startNewRoom}
+        >
+          ${icon(ICON.newRoom, 15)}
+        </button>
+      </div>
       <nav class="nav" @click=${onNavClick}>
         ${navGroup(
           "nav-workspace",
@@ -530,6 +563,7 @@ export function renderSidebarTop(): void {
             ${navRow("files", ICON.files, "Files")} ${navRow("crons", ICON.crons, "Crons")}
             ${navRow("keychain", ICON.keychain, "Keychain")} ${navRow("deploys", ICON.deploys, "Apps")}
             ${navRow("memory", ICON.memory, "Memory")} ${navRow("skills", ICON.skills, "Skills")}
+            ${navRow("agents", ICON.agents, "Agents")}
           `,
         )}
       </nav>
@@ -612,6 +646,9 @@ export function switchView(v: View): void {
     case "skills":
       void renderSkills();
       break;
+    case "agents":
+      void renderAgents();
+      break;
   }
 }
 
@@ -642,6 +679,9 @@ function refreshActiveView(v: View): void {
       break;
     case "skills":
       void renderSkills();
+      break;
+    case "agents":
+      void renderAgents();
       break;
   }
 }

@@ -5,6 +5,7 @@ import { swallow } from "../../chassis/src/errors.ts";
 import { groupDmText } from "./group-dm-label.ts";
 import { base64ToBytes } from "./paste-text.ts";
 import { defaultEffortForModel, harnessSupportsEffort } from "./model-options.ts";
+import type { MessagePersona, RoomConfig } from "./room-state.ts";
 
 const BASE_URL = ((import.meta as unknown as { env?: { BASE_URL?: string } }).env?.BASE_URL ?? "/").replace(/\/$/, "");
 
@@ -61,6 +62,8 @@ export interface CoreSession {
   awaitingInput?: boolean;
   backgroundJobs?: number;
   watches?: number;
+  /** Present only on rooms: the persona roster this session runs a panel over. */
+  room?: RoomConfig | null;
 }
 
 export interface SessionBackgroundView {
@@ -134,6 +137,18 @@ export async function updateSession(
   return api<{ session: CoreSession }>(`/api/sessions/${encodeURIComponent(id)}`, {
     method: "POST",
     body: JSON.stringify(patch),
+  });
+}
+
+/**
+ * Sets (or clears, with `null`) the persona roster on an existing session. Web threads
+ * only exist server-side once their first message lands, so callers hold the config in
+ * `room-state` until a session id is known and then apply it here.
+ */
+export async function updateSessionRoom(id: string, room: RoomConfig | null): Promise<{ session: CoreSession }> {
+  return api<{ session: CoreSession }>(`/api/sessions/${encodeURIComponent(id)}/room`, {
+    method: "PUT",
+    body: JSON.stringify({ room }),
   });
 }
 
@@ -253,7 +268,12 @@ export interface ApprovalDecision {
   approved: boolean;
   scope?: "once" | "session" | "always";
 }
-export type AssistantWork = AssistantMessage & { work?: WorkBlock; deliveredFiles?: DeliveredFile[] };
+export type AssistantWork = AssistantMessage & {
+  work?: WorkBlock;
+  deliveredFiles?: DeliveredFile[];
+  /** Set in rooms: which persona spoke this turn, threaded from `entry.payload.persona`. */
+  persona?: MessagePersona;
+};
 
 export interface RunPoll {
   status: "pending" | "running" | "done" | "failed";
@@ -1078,6 +1098,20 @@ function postResultOk(payload: unknown): boolean {
   return p.isError !== true && p.ok !== false;
 }
 
+/**
+ * Reads the room identity core stamps onto assistant entries. Absent outside rooms and
+ * on every entry written before rooms existed, in which case the row renders unlabelled
+ * exactly as it does today.
+ */
+export function personaFromPayload(payload: unknown): MessagePersona | undefined {
+  const p = (payload ?? {}) as { persona?: { id?: unknown; name?: unknown } | null };
+  const persona = p.persona;
+  if (!persona || typeof persona !== "object") return undefined;
+  const { id, name } = persona;
+  if (typeof id !== "string" || !id || typeof name !== "string" || !name) return undefined;
+  return { id, name };
+}
+
 function userEntryText(payload: unknown): string | null {
   const p = (payload ?? {}) as { text?: unknown; display?: unknown; hidden?: unknown };
   if (p.hidden) return null;
@@ -1106,7 +1140,7 @@ export function entriesToMessages(entries: SessionEntry[], model: Model<Api>): A
     }
     deliveryFiles.push(...files);
   };
-  const flushWork = (text: string, at?: number, closed = false): void => {
+  const flushWork = (text: string, at?: number, closed = false, persona?: MessagePersona): void => {
     if (!text && !pending.length && !deliveryFiles.length) return;
     const deliveredSilence = (a: ToolActivity): boolean => {
       if (a.type !== "tool_result") return false;
@@ -1141,6 +1175,7 @@ export function entriesToMessages(entries: SessionEntry[], model: Model<Api>): A
         activity: pending,
       };
     if (deliveryFiles.length) msg.deliveredFiles = deliveryFiles;
+    if (persona) msg.persona = persona;
     out.push(msg as AgentMessage);
     pending = [];
     deliveryFiles = [];
@@ -1215,6 +1250,7 @@ export function entriesToMessages(entries: SessionEntry[], model: Model<Api>): A
         out.push(msg as AgentMessage);
       }
     } else if (e.type === "assistant") {
+      const persona = personaFromPayload(e.payload);
       if (text || pending.length || heldPosts.size) {
         spillHeldPosts();
         if (posted && text) {
@@ -1225,9 +1261,9 @@ export function entriesToMessages(entries: SessionEntry[], model: Model<Api>): A
             payload: { text, demoted: true },
             createdAt: e.createdAt,
           });
-          flushWork("", e.createdAt);
+          flushWork("", e.createdAt, false, persona);
         } else {
-          flushWork(text, e.createdAt, !posted);
+          flushWork(text, e.createdAt, !posted, persona);
         }
       }
       posted = false;

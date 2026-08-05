@@ -24,6 +24,8 @@ import {
   Users,
   X,
 } from "lucide";
+import { noteRoom } from "./room-state";
+import { ensureRoomPersonas } from "./rooms";
 import {
   api,
   attachPendingApprovals,
@@ -1145,6 +1147,10 @@ export async function refreshSessions(
   try {
     const r = await api<{ sessions: CoreSession[] }>("/api/sessions");
     if (seq !== sessionRefreshSeq) return false;
+    for (const session of r.sessions ?? []) {
+      noteRoom(session.threadRef, session.room ?? null);
+      if (session.room) void ensureRoomPersonas();
+    }
     sessionsState.list = reconcileSessions(r.sessions ?? [], sessionsState.list);
     sessionsState.loaded = true;
     sessionsNotice = "";

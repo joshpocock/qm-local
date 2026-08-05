@@ -171,6 +171,44 @@ function sendHtml(res: ServerResponse, status: number, html: string): void {
   res.end(html);
 }
 
+const AGENT_STRING_FIELDS = ["name", "color", "glyph", "harnessId", "modelId", "instructions"] as const;
+
+/**
+ * Whitelists the persona fields the browser may set. `principalId` is deliberately not
+ * copyable — the relay always binds the signed-in user. On create the runtime fields are
+ * required by core, so they are passed through even when blank and core answers 400;
+ * on update only present fields are forwarded so a patch stays a patch.
+ */
+function agentDraftFromBody(body: Record<string, unknown>, create: boolean): Record<string, unknown> {
+  const draft: Record<string, unknown> = {};
+  for (const field of AGENT_STRING_FIELDS) {
+    if (typeof body[field] === "string") draft[field] = body[field];
+  }
+  if (typeof body.enabled === "boolean") draft.enabled = body.enabled;
+  if (create && typeof body.scopeId === "string") draft.scopeId = body.scopeId;
+  return draft;
+}
+
+const ROOM_MAX_PERSONAS = 4;
+
+/**
+ * Normalises a room roster. Returns `null` to clear the room, a config to set it, or
+ * `undefined` when the body is neither (the route answers 400). Core validates again —
+ * this only keeps obvious junk off the wire.
+ */
+function roomFromBody(body: { room?: unknown }): { personaIds: string[]; rounds: number } | null | undefined {
+  if (body.room === null) return null;
+  if (typeof body.room !== "object" || body.room === null) return undefined;
+  const room = body.room as { personaIds?: unknown; rounds?: unknown };
+  if (!Array.isArray(room.personaIds)) return undefined;
+  const personaIds = room.personaIds.filter((id): id is string => typeof id === "string" && id.length > 0);
+  if (!personaIds.length || personaIds.length > ROOM_MAX_PERSONAS) return undefined;
+  if (new Set(personaIds).size !== personaIds.length) return undefined;
+  const rounds = room.rounds;
+  if (rounds !== 1 && rounds !== 2 && rounds !== 3) return undefined;
+  return { personaIds, rounds };
+}
+
 const SSE_CORE_POLL_MS = 100;
 const SSE_STALE_POLL_MS = 1_000;
 const SSE_IDLE_MS = 6 * 60_000;
@@ -940,6 +978,79 @@ const routeRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (!scope) return json(res, 400, { error: "bad_request", message: "scope required" });
       const qs = new URLSearchParams({ principalId: user, scope });
       const r = await coreFetch("GET", `/v1/scope-resources?${qs.toString()}`);
+      return relay(res, r);
+    }
+
+    // Agent personas. A straight relay of core's /v1/agents, which is only mounted when
+    // core runs with QM_AGENT_ROOMS=1 — with the flag off these calls come back 404 and
+    // the Agents page renders its "not enabled on this deployment" card.
+    if (method === "GET" && path === "/api/agents") {
+      const r = await coreFetch("GET", `/v1/agents?principalId=${encodeURIComponent(user)}`);
+      return relay(res, r);
+    }
+
+    if (method === "GET" && path.startsWith("/api/agents/")) {
+      const id = decodeURIComponent(path.slice("/api/agents/".length));
+      const r = await coreFetch("GET", `/v1/agents/${encodeURIComponent(id)}?principalId=${encodeURIComponent(user)}`);
+      return relay(res, r);
+    }
+
+    if (method === "POST" && path === "/api/agents") {
+      let draft: Record<string, unknown>;
+      try {
+        draft = agentDraftFromBody(JSON.parse((await readBody(req)) || "{}") as Record<string, unknown>, true);
+      } catch (e) {
+        if (e instanceof PayloadTooLargeError) throw e;
+        return json(res, 400, { error: "bad_request" });
+      }
+      const r = await coreFetch("POST", "/v1/agents", JSON.stringify({ principalId: user, ...draft }));
+      return relay(res, r);
+    }
+
+    if (method === "PUT" && path.startsWith("/api/agents/")) {
+      const id = decodeURIComponent(path.slice("/api/agents/".length));
+      let patch: Record<string, unknown>;
+      try {
+        patch = agentDraftFromBody(JSON.parse((await readBody(req)) || "{}") as Record<string, unknown>, false);
+      } catch (e) {
+        if (e instanceof PayloadTooLargeError) throw e;
+        return json(res, 400, { error: "bad_request" });
+      }
+      const r = await coreFetch(
+        "PUT",
+        `/v1/agents/${encodeURIComponent(id)}`,
+        JSON.stringify({ principalId: user, ...patch }),
+      );
+      return relay(res, r);
+    }
+
+    if (method === "DELETE" && path.startsWith("/api/agents/")) {
+      const id = decodeURIComponent(path.slice("/api/agents/".length));
+      const r = await coreFetch(
+        "DELETE",
+        `/v1/agents/${encodeURIComponent(id)}`,
+        JSON.stringify({ principalId: user }),
+      );
+      return relay(res, r);
+    }
+
+    if (method === "PUT" && path.startsWith("/api/sessions/") && path.endsWith("/room")) {
+      const id = decodeURIComponent(path.slice("/api/sessions/".length, -"/room".length));
+      let room: unknown;
+      try {
+        room = roomFromBody(JSON.parse((await readBody(req)) || "{}") as { room?: unknown });
+      } catch (e) {
+        if (e instanceof PayloadTooLargeError) throw e;
+        return json(res, 400, { error: "bad_request" });
+      }
+      if (room === undefined) {
+        return json(res, 400, { error: "bad_request", message: "room must be a roster config or null" });
+      }
+      const r = await coreFetch(
+        "PUT",
+        `/v1/sessions/${encodeURIComponent(id)}/room`,
+        JSON.stringify({ principalId: user, room }),
+      );
       return relay(res, r);
     }
 

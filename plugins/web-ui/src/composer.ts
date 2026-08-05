@@ -49,6 +49,7 @@ import { bumpSessionActivity, dropPendingSession, renderList } from "./sessions"
 import { adminSessionLogUrl, appState, can } from "./shell";
 import { base64ToText, bytesToBase64, insertIntoDraft, pasteChipLabel } from "./paste-text";
 import { clearDraft, newChatDraftKey, saveDraft } from "./drafts";
+import { isRoomThread } from "./room-state";
 
 export type ComposerMenu = "effort" | "harness" | "model" | "settings";
 
@@ -252,6 +253,14 @@ export function createComposerSurface(ctx: ConvCtx): ComposerSurface {
 
   function scopeKey(): string | null {
     return runtimeScopeKey(ctx.chat.state.scopeId);
+  }
+
+  /**
+   * In a room every persona brings its own harness and model, so a per-thread override
+   * would be meaningless — the pickers are hidden and the header shows the roster instead.
+   */
+  function roomThread(): boolean {
+    return isRoomThread(ctx.chat.state.threadRef);
   }
 
   function currentModelOption(): ModelOption {
@@ -511,8 +520,10 @@ export function createComposerSurface(ctx: ConvCtx): ComposerSurface {
             ${
               ctx.pane
                 ? settingsControl(agent, selectedModel, inputBlocked)
-                : html`
-                    ${
+                : roomThread()
+                  ? nothing
+                  : html`
+                      ${
                       modelToggled
                         ? html`<button
                             class="runtime-default-btn"
@@ -527,7 +538,7 @@ export function createComposerSurface(ctx: ConvCtx): ComposerSurface {
                           </button>`
                         : nothing
                     }
-                    ${
+                      ${
                       modelToggled && activeRuntimeConfig?.scopeOverride
                         ? html`<button
                             class="runtime-default-btn"
@@ -541,7 +552,7 @@ export function createComposerSurface(ctx: ConvCtx): ComposerSurface {
                           </button>`
                         : nothing
                     }
-                    ${menuControl({
+                      ${menuControl({
                       kind: "model",
                       label: selectedModel.buttonLabel,
                       title: "Model",
@@ -554,7 +565,7 @@ export function createComposerSurface(ctx: ConvCtx): ComposerSurface {
                       disabled: inputBlocked,
                       onSelect: (value: string) => selectModel(value, agent),
                     })}
-                    ${menuControl({
+                      ${menuControl({
                       kind: "harness",
                       label: selectedModel.harnessLabel,
                       title: "Harness",
@@ -564,7 +575,7 @@ export function createComposerSurface(ctx: ConvCtx): ComposerSurface {
                       disabled: inputBlocked,
                       onSelect: (value: string) => selectHarness(value, agent),
                     })}
-                  `
+                    `
             }
             ${sendControls(agent)}
           </div>
@@ -757,8 +768,12 @@ export function createComposerSurface(ctx: ConvCtx): ComposerSurface {
                   role="menu"
                   @click=${(e: Event) => e.stopPropagation()}
                 >
-                  <div class="menu-title">Model</div>
-                  ${getModelOptionsForHarness(selected.harnessId, scopeKey()).map(
+                  ${
+                    roomThread()
+                      ? nothing
+                      : html`
+                          <div class="menu-title">Model</div>
+                          ${getModelOptionsForHarness(selected.harnessId, scopeKey()).map(
                     (option) => html`
                       <button
                         class="menu-option ${option.value === selected.value ? "active" : ""}"
@@ -774,9 +789,9 @@ export function createComposerSurface(ctx: ConvCtx): ComposerSurface {
                       </button>
                     `,
                   )}
-                  <div class="menu-title">Harness</div>
-                  <div class="settings-seg" role="group" aria-label="Harness">
-                    ${getHarnessOptions(scopeKey()).map(
+                          <div class="menu-title">Harness</div>
+                          <div class="settings-seg" role="group" aria-label="Harness">
+                            ${getHarnessOptions(scopeKey()).map(
                       (option) => html`
                         <button
                           class="settings-chip ${option.value === selected.harnessId ? "active" : ""}"
@@ -788,7 +803,9 @@ export function createComposerSurface(ctx: ConvCtx): ComposerSurface {
                         </button>
                       `,
                     )}
-                  </div>
+                          </div>
+                        `
+                  }
                   ${
                     harnessSupportsEffort(selected.harnessId)
                       ? html`

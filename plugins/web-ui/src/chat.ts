@@ -92,6 +92,8 @@ import {
 import { backgroundLabel, clearWorking, conversationBackground, markWorking } from "./session-list";
 import { liveTurnThreadRef } from "./working-dot";
 import { newChatDraftKey, saveDraft, storedDraft } from "./drafts";
+import { applyPendingRoom, ensureRoomPersonas, personaAuthorChip, roomRosterChips } from "./rooms";
+import { isRoomThread, personaRowKey, roomFor } from "./room-state";
 
 installMarkdownSanitizer();
 
@@ -107,6 +109,12 @@ interface SettledRowKey {
   errorMessage: unknown;
   approvalDecision: unknown;
   forkable: boolean;
+  /**
+   * Room author identity, flattened to a string. The chip reads name/colour/glyph out of
+   * the persona cache, which fills in after the transcript first renders — without this
+   * in the key a settled row would keep whatever label it had when it was memoised.
+   */
+  persona: string;
   tpl: TemplateResult | typeof nothing;
 }
 const settledRowCache = new WeakMap<object, SettledRowKey>();
@@ -319,6 +327,13 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     container.replaceChildren(chatState.host);
     const opening = startProactiveOpenerIfNew(agent, threadRef, normalStreamFn, onWork, sessionId, scopeId, messages);
     drawActiveChat(agent, { forceScroll: true });
+    // Roster chips and transcript labels need colours and names the session read does not
+    // carry — after a reload the cache is cold, so warm it and redraw once it lands.
+    if (isRoomThread(threadRef)) {
+      void ensureRoomPersonas().then(() => {
+        if (chatState.agent === agent) drawActiveChat(agent);
+      });
+    }
     ctx.composer.focusComposerEnd();
     ctx.ensureDeliveryStream();
     if (!opening) void resumeTrackedRun(agent, threadRef, normalStreamFn, onWork);
@@ -572,6 +587,9 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     chatState.rememberedScopeId = match.scopeId;
     chatState.rememberedContextName = chatState.contextName;
     syncLocation();
+    // A room's roster is parked client-side until the first message creates the session;
+    // this is the first moment there is an id to attach it to.
+    void applyPendingRoom(chatState.threadRef, chatState.sessionId);
     renderList();
     drawActiveChat(agent);
   }
@@ -954,6 +972,7 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
         <div class="chat-heading">
           <div class="chat-title">${title}</div>
           <div class="chat-subtitle">${readOnly ? "Read-only" : detail}</div>
+          ${roomRosterChips(roomFor(chatState.threadRef))}
         </div>
         <div class="topbar-actions">
           ${
@@ -998,9 +1017,11 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
       (!work || ((work.status === "complete" || work.status === "failed") && !work.pendingApprovals?.length));
     if (!cacheable) return chatMessage(message, index, isStreaming);
     const forkable = Boolean(chatState.threadRef && chatState.sessionId && chatState.agent);
+    const persona = personaRowKey(msg.persona);
     const hit = settledRowCache.get(message as object);
     if (
       hit &&
+      hit.persona === persona &&
       hit.index === index &&
       hit.activity === work?.activity &&
       hit.status === work?.status &&
@@ -1024,6 +1045,7 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
       errorMessage: msg.errorMessage,
       approvalDecision: msg.approvalDecision,
       forkable,
+      persona,
       tpl,
     });
     return tpl;
@@ -1062,8 +1084,8 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
       return html`
         <article class="message-row assistant-row ${isStreaming ? "streaming" : ""}" data-index=${index}>
           <div class="assistant-body">
-            ${showWork ? workBlock(work, isStreaming) : nothing} ${assistantContent(msg, isStreaming, showWork)}
-            ${assistantFileList(deliveredFiles)}
+            ${personaAuthorChip((msg as AssistantWork).persona)} ${showWork ? workBlock(work, isStreaming) : nothing}
+            ${assistantContent(msg, isStreaming, showWork)} ${assistantFileList(deliveredFiles)}
             ${msg.stopReason === "error" && msg.errorMessage ? html`<div class="composer-error inline">${msg.errorMessage}</div>` : nothing}
             ${msg.stopReason === "aborted" ? html`<div class="stopped-note">${icon(Ban, 13)}<span>Stopped</span></div>` : nothing}
             ${isStreaming ? nothing : messageMeta(msg, index)}
