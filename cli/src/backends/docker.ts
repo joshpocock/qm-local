@@ -448,14 +448,18 @@ function runArgs(ctx: DockerCtx, service: ServiceName, image: string): { args: s
     // qm-local: on this local-only target, reuse the operator's own Claude Code
     // login the way a desktop harness does, instead of requiring
     // `claude setup-token`. Opt out with QM_NO_HOST_CLAUDE_AUTH=1.
+    // Mount every host login that exists, not just the deployment default's:
+    // the admin can approve additional harnesses at runtime, and a harness
+    // whose credentials were never mounted fails every turn with "not logged
+    // in" even though the picker offers it.
     const hostClaude = hostClaudeCredentialsPath();
-    if (hostClaude && env.HARNESS === "claude") {
+    if (hostClaude) {
       args.push("-v", `${hostMountPath(hostClaude)}:/run/qm/claude-credentials.json:ro`);
       args.push("-e", "CLAUDE_CREDENTIALS_FILE=/run/qm/claude-credentials.json");
       note(`claude auth: reusing your local login (${hostClaude})`);
     }
     const hostCodex = hostCodexAuthPath();
-    if (hostCodex && env.HARNESS === "codex") {
+    if (hostCodex) {
       args.push("-v", `${hostMountPath(hostCodex)}:/run/qm/codex-auth.json:ro`);
       args.push("-e", "CODEX_AUTH_FILE=/run/qm/codex-auth.json");
       note(`codex auth: reusing your local login (${hostCodex})`);

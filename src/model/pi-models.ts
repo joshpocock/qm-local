@@ -220,7 +220,9 @@ export function modelProviderAvailabilityFor(
 ): ModelProviderAvailability {
   if (harness === "pi") return managedKeys;
   if (harness === "opencode") return { ...configKeys, openrouter: false };
-  if (harness === "codex") return configKeys;
+  // qm-local: codex authenticates itself (auth.json from `codex login`, or
+  // OPENAI_API_KEY in its process env) the same way claude does, so its
+  // models can't be gated on deployment-level provider keys.
   return ALL_PROVIDERS_AVAILABLE;
 }
 
