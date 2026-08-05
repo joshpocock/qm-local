@@ -354,6 +354,9 @@ export function createComposerSurface(ctx: ConvCtx): ComposerSurface {
     let placeholder = "Ask anything";
     if (inputBlocked) placeholder = runtimePending ? "Loading runtime…" : "Approve or deny to continue";
     else if (agent.state.isStreaming) placeholder = "Steer the running task…";
+    // Routing is core's: an untagged message goes to the whole roster, a tagged one only to
+    // the agents named. The composer just says so — it never decides who replies.
+    else if (roomThread()) placeholder = "Message the room — @mention an agent to have only them reply.";
     let composerNotice: TemplateResult | typeof nothing = nothing;
     if (composerState.processingFiles) {
       composerNotice = html`<div class="composer-note">Preparing files...</div>`;

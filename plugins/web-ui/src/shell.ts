@@ -50,6 +50,7 @@ import { replaceChildrenPreservingFocus } from "./pane-focus";
 import {
   openSession,
   closeOpenSessionMenu,
+  notePendingRoom,
   refreshSessions,
   renderChatsPage,
   renderList,
@@ -65,7 +66,7 @@ import { renderMemory, resetMemoryState } from "./memory";
 import { renderSkills } from "./skills";
 import { renderAgents, resetAgentsState } from "./agents";
 import { openRoomDialog } from "./rooms";
-import { holdPendingRoom, resetRoomState } from "./room-state";
+import { holdPendingRoom, holdPendingRoomName, resetRoomState } from "./room-state";
 import { contextsState, ensureContexts, renderContexts, resetContextsState, resolveProjectScope } from "./contexts";
 import { appState, isView, type AuthMode, type Me, type View } from "./shell-state";
 import { trapDialogFocus } from "./dialog-focus";
@@ -489,15 +490,18 @@ export function mountShell(): void {
 }
 
 /**
- * Mints a thread the same way "New chat" does, then parks the chosen roster against it.
- * A web thread has no server-side session until its first message lands, so the roster
- * cannot be PUT here — `applyPendingRoom` sends it the moment the session id appears.
+ * Mints a thread the same way "New chat" does, then parks the chosen roster and name
+ * against it. A web thread has no server-side session until its first message lands, so
+ * neither can be sent here — `applyPendingRoom` flushes both the moment the session id
+ * appears. `notePendingRoom` meanwhile files the sidebar row under Rooms straight away.
  */
-function startNewRoom(): void {
-  openRoomDialog((config) => {
+export function startNewRoom(): void {
+  openRoomDialog((config, name) => {
     closeSidebarOnNarrowView();
     const threadRef = mainConversation().newChat();
     holdPendingRoom(threadRef, config);
+    holdPendingRoomName(threadRef, name);
+    notePendingRoom(threadRef, config, name);
     mainConversation().redraw();
   });
 }

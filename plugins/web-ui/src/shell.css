@@ -648,6 +648,28 @@ body.resizing-sidebar {
   opacity: 0.8;
 }
 
+/* Rooms get their own sidebar section, headed like Pinned but with a "+" of its own. */
+.recents-group.rooms-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.recents-group.rooms-head > svg {
+  flex: 0 0 auto;
+  opacity: 0.8;
+}
+.rooms-head-new {
+  width: 22px;
+  height: 22px;
+  /* Negative margins keep the button from growing the heading it sits in. */
+  margin: -4px -4px -4px auto;
+}
+.recents-group.rooms-head:hover .rooms-head-new,
+.rooms-head-new:focus-visible {
+  color: var(--foreground);
+  opacity: 1;
+}
+
 .session-row.colored .session {
   background: color-mix(in srgb, var(--session-color) 14%, transparent);
 }
@@ -7061,8 +7083,82 @@ h3.ambient-field-label {
   white-space: nowrap;
 }
 
+/* The roster shrunk to an overlapping stack of glyphs, for a sidebar room row. */
+.room-dots {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+.room-dots .persona-dot {
+  width: 15px;
+  height: 15px;
+  border-radius: 999px;
+  font-size: 8.5px;
+  box-shadow: 0 0 0 1.5px var(--background);
+}
+.room-dots .persona-dot + .persona-dot {
+  margin-left: -4px;
+}
+.room-dots-more {
+  margin-left: 3px;
+  color: var(--muted-foreground);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+/*
+ * A room's identity over the live transcript. Same floating pill as the context banner,
+ * which drops below it on the rare thread that is both a room and in a shared context.
+ */
+.room-banner {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: calc(100% - 24px);
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--background) 86%, var(--secondary));
+  backdrop-filter: blur(6px);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--foreground) 8%, transparent);
+}
+.room-banner-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  max-width: 40%;
+  color: var(--foreground);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.room-banner-name > svg {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+}
+.room-banner-name > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.room-banner .room-roster {
+  margin-top: 0;
+  min-width: 0;
+}
+.room-banner ~ .context-banner {
+  top: 52px;
+}
+
 .room-dialog {
   width: min(480px, 100%);
+}
+.room-name-field {
+  margin-top: 16px;
 }
 .room-dialog-lead {
   margin: 12px 0 0;

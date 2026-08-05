@@ -7,6 +7,8 @@ import {
   chatBrowseStatusMatches,
   clearWorking,
   groupProjectSessions,
+  isRoomSession,
+  splitRooms,
   backgroundLabel,
   conversationBackground,
   markWorking,
@@ -78,6 +80,45 @@ test("splitPinned lifts pinned rows out in order and leaves the rest untouched",
   assert.deepEqual(splitPinned([]).pinned, []);
   assert.deepEqual(
     splitPinned([a]).rest.map((s) => s.id),
+    ["a"],
+  );
+});
+
+test("a session belongs under Rooms exactly when it carries a roster someone is in", () => {
+  assert.equal(isRoomSession(saved("plain", "web:u:plain")), false, "an ordinary chat is not a room");
+  assert.equal(isRoomSession({ ...saved("a", "web:u:a"), room: null }), false, "a cleared roster is not a room");
+  assert.equal(
+    isRoomSession({ ...saved("b", "web:u:b"), room: { personaIds: [], rounds: 1 } }),
+    false,
+    "a room nobody is in is not a room",
+  );
+  assert.equal(isRoomSession({ ...saved("c", "web:u:c"), room: { personaIds: ["ap_1"], rounds: 1 } }), true);
+  assert.equal(
+    isRoomSession({ ...pending("web:u:new"), room: { personaIds: ["ap_1", "ap_2"], rounds: 2 } }),
+    true,
+    "a brand-new room files under Rooms before its session exists",
+  );
+});
+
+test("splitRooms lifts rooms out in order, exactly as splitPinned lifts pinned rows", () => {
+  const a = saved("a", "web:u:a");
+  const b = { ...saved("b", "web:u:b"), room: { personaIds: ["ap_1"], rounds: 1 } };
+  const c = saved("c", "web:u:c");
+  const d = { ...saved("d", "web:u:d"), room: { personaIds: ["ap_1", "ap_2"], rounds: 3 } };
+  const { rooms, rest } = splitRooms([a, b, c, d]);
+  assert.deepEqual(
+    rooms.map((s) => s.id),
+    ["b", "d"],
+    "rooms keep their relative (recency) order",
+  );
+  assert.deepEqual(
+    rest.map((s) => s.id),
+    ["a", "c"],
+    "and the chats they came from are otherwise untouched",
+  );
+  assert.deepEqual(splitRooms([]).rooms, []);
+  assert.deepEqual(
+    splitRooms([a]).rest.map((s) => s.id),
     ["a"],
   );
 });

@@ -27,6 +27,27 @@ export function splitPinned<T extends Pick<CoreSession, "pinned">>(sessions: rea
   return { pinned, rest };
 }
 
+/**
+ * What makes a row belong under Rooms rather than Chats: a roster with someone in it.
+ * A `room` of `null` (core cleared it) or an empty roster is an ordinary chat — a room
+ * nobody is in is not a room. A brand-new room has no server session yet, so the sidebar
+ * row is stamped client-side at pick time (see `notePendingRoom`) and matches here too.
+ */
+export function isRoomSession(s: Pick<CoreSession, "room">): boolean {
+  return Boolean(s.room?.personaIds?.length);
+}
+
+/**
+ * Lifts rooms into their own section, exactly as `splitPinned` lifts pinned rows. Both
+ * halves keep the order they came in with, so the caller's recency sort still holds.
+ */
+export function splitRooms<T extends Pick<CoreSession, "room">>(sessions: readonly T[]): { rooms: T[]; rest: T[] } {
+  const rooms: T[] = [];
+  const rest: T[] = [];
+  for (const s of sessions) (isRoomSession(s) ? rooms : rest).push(s);
+  return { rooms, rest };
+}
+
 export function chatBrowseStatusMatches(
   session: Pick<CoreSession, "archived" | "awaitingInput">,
   status: ChatBrowseStatus,

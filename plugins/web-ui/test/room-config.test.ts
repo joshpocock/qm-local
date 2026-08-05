@@ -12,10 +12,15 @@ import {
 import {
   cachePersonas,
   clearPersonaCache,
+  clearPendingRoomName,
+  defaultRoomName,
+  defaultRoomNameFor,
   holdPendingRoom,
+  holdPendingRoomName,
   isRoomThread,
   noteRoom,
   pendingRoomFor,
+  pendingRoomNameFor,
   clearPendingRoom,
   clearRoomRefusal,
   noteRoomRefusal,
@@ -154,6 +159,90 @@ test("a session read that has not caught up yet cannot drop a roster still await
 });
 
 // ---------------------------------------------------------------------------
+// Room names
+// ---------------------------------------------------------------------------
+
+test("an unnamed room is named after its roster, and reads as a sentence up to three", () => {
+  assert.equal(defaultRoomName(["Scout"]), "Scout");
+  assert.equal(defaultRoomName(["Scout", "Critic"]), "Scout & Critic");
+  assert.equal(defaultRoomName(["Scout", "Critic", "Mesh"]), "Scout, Critic & Mesh");
+});
+
+test("past three the rest are counted, so a big roster still fits a sidebar row", () => {
+  assert.equal(defaultRoomName(["Scout", "Critic", "Mesh", "Archivist"]), "Scout, Critic, Mesh & 1 more");
+  assert.equal(defaultRoomName(Array.from({ length: 12 }, (_, i) => `A${i}`)), "A0, A1, A2 & 9 more");
+});
+
+test("one verbose agent cannot run away with the name", () => {
+  const long = "Extremely Verbose Research Assistant";
+  assert.equal(defaultRoomName([long]), "Extremely Verbose…", "each member is clipped, with an ellipsis to say so");
+  assert.ok(defaultRoomName([long, long, long]).length < 64, "and three of them still fit");
+});
+
+test("a nameless roster still has something to be called", () => {
+  assert.equal(defaultRoomName([]), "Room");
+  assert.equal(defaultRoomName(["", "   "]), "Room", "blank names are not members");
+  assert.equal(defaultRoomName(["  Scout  ", "Critic"]), "Scout & Critic", "and real ones are trimmed");
+});
+
+test("the derived name resolves ids through the persona cache, and never drops a member", () => {
+  resetRoomState();
+  cachePersonas([makeAgent("ap_1", "Scout"), makeAgent("ap_2", "Critic")]);
+  assert.equal(defaultRoomNameFor({ personaIds: ["ap_1", "ap_2"] }), "Scout & Critic");
+  assert.equal(
+    defaultRoomNameFor({ personaIds: ["ap_1", "ap_unknown"] }),
+    "Scout & ap_unknown",
+    "an id the cache has never seen shows as itself rather than vanishing",
+  );
+  assert.equal(defaultRoomNameFor(null), "Room");
+  assert.equal(defaultRoomNameFor({ personaIds: [] }), "Room");
+});
+
+// ---------------------------------------------------------------------------
+// Pending room names
+// ---------------------------------------------------------------------------
+
+test("a name picked before the session exists is held against the thread, per thread", () => {
+  resetRoomState();
+  assert.equal(pendingRoomNameFor("web:alice:n1"), null);
+  holdPendingRoomName("web:alice:n1", "  Design review  ");
+  assert.equal(pendingRoomNameFor("web:alice:n1"), "Design review", "trimmed on the way in");
+  assert.equal(pendingRoomNameFor("web:alice:n2"), null, "a name belongs to one thread only");
+  assert.equal(pendingRoomNameFor(null), null);
+});
+
+test("a blank name parks nothing — the roster-derived default is not worth persisting", () => {
+  resetRoomState();
+  holdPendingRoomName("web:alice:n3", "Design review");
+  holdPendingRoomName("web:alice:n3", "   ");
+  assert.equal(pendingRoomNameFor("web:alice:n3"), null, "and it clears a name already parked");
+});
+
+test("a name clears only once it lands, so a failed apply is retried on the next attempt", () => {
+  resetRoomState();
+  holdPendingRoomName("web:alice:n4", "Design review");
+  // A failed POST leaves it exactly where it was: nothing calls clear on that path.
+  assert.equal(pendingRoomNameFor("web:alice:n4"), "Design review");
+  clearPendingRoomName("web:alice:n4");
+  assert.equal(pendingRoomNameFor("web:alice:n4"), null, "applied once, never re-sent");
+});
+
+test("the name and the roster clear independently — the turn carries one and not the other", () => {
+  resetRoomState();
+  holdPendingRoom("web:alice:n5", { personaIds: ["ap_1"], rounds: 1 });
+  holdPendingRoomName("web:alice:n5", "Design review");
+  clearPendingRoom("web:alice:n5");
+  assert.equal(pendingRoomFor("web:alice:n5"), null, "the roster rode in on the first turn");
+  assert.equal(pendingRoomNameFor("web:alice:n5"), "Design review", "the name still needs a session id");
+});
+
+test("resetting room state drops parked names with everything else", () => {
+  holdPendingRoomName("web:alice:n6", "Design review");
+  resetRoomState();
+  assert.equal(pendingRoomNameFor("web:alice:n6"), null);
+});
+
+// ---------------------------------------------------------------------------
 // Refused rosters
 // ---------------------------------------------------------------------------
 
@@ -258,7 +347,17 @@ test("the author chip renders in the assistant branch only, above the bubble", (
 });
 
 test("a room's header shows the roster and its composer hides the per-thread runtime pickers", () => {
-  assert.match(chat, /\$\{roomRosterChips\(roomFor\(chatState\.threadRef\)\)\}/);
+  assert.match(chat, /\$\{roomRosterChips\(room\)\}/, "the header draws whatever roster it was handed");
+  assert.match(
+    chat,
+    /room: RoomConfig \| null = roomFor\(chatState\.threadRef\),/,
+    "which defaults to the mounted thread's",
+  );
+  assert.match(
+    chat,
+    /\$\{chatHeader\(groupDmTitle\(s\), surfaceOf\(s\), true, s\.room \?\? null\)\}/,
+    "and the read-only pane, which clears threadRef before it draws, passes the session's own",
+  );
   assert.match(
     composer,
     /function roomThread\(\): boolean \{\s*\n\s*return isRoomThread\(ctx\.chat\.state\.threadRef\);/,
@@ -310,4 +409,96 @@ test("the refusal is surfaced at the composer, with its reason and a way to dism
   assert.match(composer, /composer-error room-refusal/, "it renders in the composer's own error slot");
   assert.match(composer, /This room could not start: \$\{refusal\}/);
   assert.match(composer, /clearRoomRefusal\(ctx\.chat\.state\.threadRef\);/, "and can be dismissed");
+});
+
+// ---------------------------------------------------------------------------
+// Named rooms as a sidebar surface
+// ---------------------------------------------------------------------------
+
+const roomsSrc = readFileSync(new URL("../src/rooms.ts", import.meta.url), "utf8");
+const sessions = readFileSync(new URL("../src/sessions.ts", import.meta.url), "utf8");
+const shell = readFileSync(new URL("../src/shell.ts", import.meta.url), "utf8");
+
+test("the dialog asks for a name first and offers the derived one as the placeholder", () => {
+  const dialog = roomsSrc.slice(roomsSrc.indexOf("function roomDialogTpl"));
+  const body = dialog.slice(0, dialog.indexOf("\n}\n"));
+  assert.ok(body.indexOf('id="room-name"') < body.indexOf("${rosterBody()}"), "the name field comes before the roster");
+  assert.match(body, /autofocus/, "and takes focus when the dialog opens");
+  assert.match(body, /placeholder=\$\{derivedRoomName\(dialogState\.personaIds\)\}/);
+});
+
+test("a blank name falls back to the roster, so a room is never nameless", () => {
+  assert.match(roomsSrc, /return dialogState\.name\.trim\(\) \|\| derivedRoomName\(personaIds\);/);
+  assert.match(roomsSrc, /onCreate\?\.\(config, name\);/, "the name rides out with the config");
+});
+
+test("a new room parks its name next to its roster and files under Rooms straight away", () => {
+  const start = shell.slice(shell.indexOf("export function startNewRoom"));
+  const body = start.slice(0, start.indexOf("\n}\n"));
+  assert.match(body, /holdPendingRoom\(threadRef, config\);/);
+  assert.match(body, /holdPendingRoomName\(threadRef, name\);/);
+  assert.match(body, /notePendingRoom\(threadRef, config, name\);/, "the sidebar row is stamped before any turn");
+});
+
+test("the parked name is applied the moment a session id exists, and only cleared if it lands", () => {
+  const apply = roomsSrc.slice(roomsSrc.indexOf("export async function applyPendingRoom"));
+  const body = apply.slice(0, apply.indexOf("\n}\n"));
+  assert.match(body, /const name = pendingRoomNameFor\(threadRef\);/);
+  assert.match(body, /await updateSession\(sessionId, \{ title: name \}\);/, "an explicit title, not a regeneration");
+  assert.ok(
+    body.indexOf("await updateSession(sessionId, { title: name });") < body.indexOf("clearPendingRoomName(threadRef)"),
+    "cleared only after the POST came back without throwing",
+  );
+  assert.match(body, /swallow\("web-ui: apply room name", e\);/, "a failure never reaches the chat");
+});
+
+test("a room's name survives an unnamed room: the roster is the default title everywhere", () => {
+  const def = sessions.slice(sessions.indexOf("export function defaultSessionTitle"));
+  const body = def.slice(0, def.indexOf("\n}\n"));
+  assert.match(body, /if \(s\.room\?\.personaIds\.length\) return defaultRoomNameFor\(s\.room\);/);
+  assert.ok(body.indexOf("defaultRoomNameFor") < body.indexOf("projectName(s.scopeId)"), "a room outranks its project");
+});
+
+test("rooms are lifted into their own sidebar section before chats are grouped", () => {
+  const list = sessions.slice(sessions.indexOf("export function renderList"));
+  const body = list.slice(0, list.indexOf("\n}\n"));
+  assert.match(body, /const \{ rooms, rest: chats \} = splitRooms\(rest\);/);
+  assert.ok(
+    body.indexOf("splitRooms(rest)") < body.indexOf("recentItemsFor(chats)"),
+    "a room must never nest under a project heading",
+  );
+  assert.match(body, /recents-group rooms-head/, "under a Rooms heading of its own");
+  assert.match(body, /aria-label="New room"/, "which carries its own way to start one");
+});
+
+test("a room row shows its roster as glyphs, reusing the chip renderer", () => {
+  assert.match(sessions, /\$\{roomRosterDots\(s\.room\)\}/);
+  assert.match(sessions, /\$\{room \? "room-row" : ""\}/);
+  assert.match(roomsSrc, /function personaDot\(chip: PersonaChip\): TemplateResult/, "one dot renderer, three callers");
+  for (const caller of ["personaAuthorChip", "roomRosterChips", "roomRosterDots"]) {
+    const at = roomsSrc.indexOf(`export function ${caller}`);
+    const body = roomsSrc.slice(at, roomsSrc.indexOf("\n}\n", at));
+    assert.ok(
+      /personaDot\(|personaChip\(/.test(body),
+      `${caller} must go through the shared renderers, not hand-roll the glyph markup`,
+    );
+  }
+});
+
+test("the composer says how tagging works, without deciding who replies", () => {
+  assert.match(composer, /else if \(roomThread\(\)\) placeholder = "Message the room — @mention an agent/);
+  assert.equal(
+    /routeTagged|tagsInMessage|parseMentions/.test(composer),
+    false,
+    "@tag routing is core-side only — the client must not fork on it",
+  );
+});
+
+test("a room thread reads as a room in the live pane: its name, then its roster", () => {
+  const banner = chat.slice(chat.indexOf("function roomBanner"));
+  const body = banner.slice(0, banner.indexOf("\n  }"));
+  assert.match(body, /const room = roomFor\(chatState\.threadRef\);/);
+  assert.match(body, /\$\{roomRosterChips\(room\)\}/, "the header chips are the same ones");
+  assert.ok(body.indexOf("room-banner-name") < body.indexOf("roomRosterChips"), "the name reads first");
+  assert.match(chat, /\$\{roomBanner\(\)\} \$\{contextBanner\(\)\}/, "and it is mounted in the active chat shell");
 });

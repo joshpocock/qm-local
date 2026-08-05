@@ -24,8 +24,8 @@ import {
   Users,
   X,
 } from "lucide";
-import { noteRoom } from "./room-state";
-import { ensureRoomPersonas } from "./rooms";
+import { defaultRoomNameFor, noteRoom, type RoomConfig } from "./room-state";
+import { ensureRoomPersonas, roomRosterDots } from "./rooms";
 import {
   api,
   attachPendingApprovals,
@@ -48,11 +48,13 @@ import {
   chatBrowseStatusMatches,
   bumpActivity,
   groupProjectSessions,
+  isRoomSession,
   recencyGroup,
   recentProjectSeeds,
   reconcileSessions,
   rowIndicators,
   splitPinned,
+  splitRooms,
   withPendingSession,
   withoutUnsentPending,
   type RecentItem,
@@ -72,7 +74,7 @@ import {
 } from "./contexts";
 import { groupDmLabel, groupDmText } from "./group-dm-label";
 import { transcriptModel } from "./model-options";
-import { appState, closeSidebarOnNarrowView, renderSidebarTop, showMainEmpty } from "./shell";
+import { appState, closeSidebarOnNarrowView, renderSidebarTop, showMainEmpty, startNewRoom } from "./shell";
 import { allConversations, mainConversation } from "./conversations";
 import type { Conversation } from "./conv-types";
 import {
@@ -195,6 +197,9 @@ function projectMenuKey(scopeId: string): string {
 }
 
 export function defaultSessionTitle(s: CoreSession): string {
+  // A room is named after its roster until someone names it, in a project or not — the
+  // roster is what the row is about, and every room surface reads the name from here.
+  if (s.room?.personaIds.length) return defaultRoomNameFor(s.room);
   const project = projectName(s.scopeId);
   if (project) return project;
   const surface = surfaceOf(s);
@@ -260,7 +265,10 @@ export function renderList(): void {
   const active = visible.filter((s) => !s.archived);
   const archived = visible.filter((s) => s.archived);
   const { pinned, rest } = splitPinned(active);
-  const activeItems = recentItemsFor(rest);
+  // Rooms are their own surface, so they come out before chats are grouped by project and
+  // recency — a room never nests under a project heading.
+  const { rooms, rest: chats } = splitRooms(rest);
+  const activeItems = recentItemsFor(chats);
   const archivedItems: RecentItem[] = archived.map((session) => ({ kind: "session", session }));
   armMidnightRefresh();
   render(
@@ -271,6 +279,29 @@ export function renderList(): void {
               <div class="recents-group pinned-head">${icon(Pin, 11)}<span>Pinned</span></div>
               ${repeat(
                 pinned,
+                (session) => session.threadRef,
+                (session) => sessionRow(session),
+              )}
+            `
+          : nothing
+      }
+      ${
+        rooms.length
+          ? html`
+              <div class="recents-group rooms-head">
+                ${icon(Users, 11)}<span>Rooms</span>
+                <button
+                  class="recent-project-new-chat rooms-head-new"
+                  type="button"
+                  title="New room"
+                  aria-label="New room"
+                  @click=${startNewRoom}
+                >
+                  ${icon(Plus, 14)}
+                </button>
+              </div>
+              ${repeat(
+                rooms,
                 (session) => session.threadRef,
                 (session) => sessionRow(session),
               )}
@@ -690,6 +721,17 @@ export function addPendingSession(threadRef: string, scopeId: string | null, cha
   renderList();
 }
 
+/**
+ * Stamps the roster and name a brand-new room just picked onto its not-yet-saved sidebar
+ * row, so it files under Rooms with its name from the moment it is created rather than
+ * sitting in Chats as "Web chat" until the first message creates the session. The server
+ * copy overwrites this the moment it exists.
+ */
+export function notePendingRoom(threadRef: string, room: RoomConfig, title: string): void {
+  sessionsState.list = sessionsState.list.map((s) => (s.threadRef === threadRef ? { ...s, room, title } : s));
+  renderList();
+}
+
 export function dropPendingSession(threadRef: string): void {
   sessionsState.list = withoutUnsentPending(sessionsState.list, threadRef);
   renderList();
@@ -759,6 +801,7 @@ function sessionRow(s: CoreSession, projectChild = false): TemplateResult {
   if (untitledProjectChild) title = surfaceOf(s) === "web" ? "Web chat" : "New chat";
   const readOnly = !isContinuable(s, appState.me?.user ?? "");
   const surface = surfaceOf(s);
+  const room = isRoomSession(s);
   const context = projectChild ? null : rowContext(s);
   const working = sessionWorking(s);
   let titleContent: string | TemplateResult = groupDmTitle(s);
@@ -769,6 +812,7 @@ function sessionRow(s: CoreSession, projectChild = false): TemplateResult {
   }
   const ariaLabel = [
     title,
+    room ? "room" : null,
     surface !== "web" ? surface : null,
     context,
     working ? "agent is working" : null,
@@ -781,7 +825,7 @@ function sessionRow(s: CoreSession, projectChild = false): TemplateResult {
     .join(", ");
   return html`
     <div
-      class="session-row ${active ? "active" : ""} ${menuOpen ? "menu-open" : ""} ${readOnly ? "read-only" : ""} ${refreshingTitle ? "title-refreshing" : ""} ${working ? "working" : ""} ${s.awaitingInput ? "awaiting-input" : ""} ${projectChild ? "project-child" : ""} ${s.color ? "colored" : ""}"
+      class="session-row ${active ? "active" : ""} ${menuOpen ? "menu-open" : ""} ${readOnly ? "read-only" : ""} ${refreshingTitle ? "title-refreshing" : ""} ${working ? "working" : ""} ${s.awaitingInput ? "awaiting-input" : ""} ${projectChild ? "project-child" : ""} ${room ? "room-row" : ""} ${s.color ? "colored" : ""}"
       style=${s.color ? `--session-color:${s.color}` : nothing}
     >
       <button
@@ -799,7 +843,7 @@ function sessionRow(s: CoreSession, projectChild = false): TemplateResult {
         }}
       >
         <div class="title" aria-live="polite">
-          ${statusMarks(s)}${surfaceGlyph(s)}${readOnly ? html`<span class="ro-lock" title="Read-only">${icon(Lock, 12)}</span>` : nothing}<span
+          ${statusMarks(s)}${surfaceGlyph(s)}${roomRosterDots(s.room)}${readOnly ? html`<span class="ro-lock" title="Read-only">${icon(Lock, 12)}</span>` : nothing}<span
             class="tl"
             >${titleContent}</span
           >${context ? html`<span class="row-context" title=${context}>${context}</span>` : nothing}

@@ -87,13 +87,14 @@ import {
   renderList,
   sessionsState,
   sessionSlackUrl,
+  sessionTitle,
   surfaceOf,
 } from "./sessions";
 import { backgroundLabel, clearWorking, conversationBackground, markWorking } from "./session-list";
 import { liveTurnThreadRef } from "./working-dot";
 import { newChatDraftKey, saveDraft, storedDraft } from "./drafts";
 import { applyPendingRoom, ensureRoomPersonas, personaAuthorChip, roomRosterChips } from "./rooms";
-import { isRoomThread, personaRowKey, roomFor } from "./room-state";
+import { defaultRoomNameFor, isRoomThread, personaRowKey, roomFor, type RoomConfig } from "./room-state";
 
 installMarkdownSanitizer();
 
@@ -666,7 +667,7 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
       render(
         html`
           <div class="custom-chat-shell">
-            ${chatHeader(groupDmTitle(s), surfaceOf(s), true)}
+            ${chatHeader(groupDmTitle(s), surfaceOf(s), true, s.room ?? null)}
             <div class="readonly-banner">
               ${
                 surfaceOf(s) === "slack"
@@ -893,7 +894,7 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
                 </div>`
               : nothing
           }
-          ${contextBanner()}
+          ${roomBanner()} ${contextBanner()}
           ${
             glanceTier
               ? paneGlance(agent, messages, glanceTier)
@@ -954,6 +955,24 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     return null;
   }
 
+  /**
+   * A room's identity in the live pane: its name, then the roster that will speak. The
+   * active transcript has no top bar of its own (only the read-only view builds one), so
+   * without this a room reads exactly like a one-agent chat until someone answers.
+   */
+  function roomBanner(): TemplateResult | typeof nothing {
+    const room = roomFor(chatState.threadRef);
+    if (!room?.personaIds.length) return nothing;
+    const row = sessionsState.list.find((s) =>
+      chatState.sessionId ? s.id === chatState.sessionId : s.threadRef === chatState.threadRef,
+    );
+    const name = row ? sessionTitle(row) : defaultRoomNameFor(room);
+    return html`<div class="room-banner">
+      <div class="room-banner-name">${icon(Users, 13)}<span>${name}</span></div>
+      ${roomRosterChips(room)}
+    </div>`;
+  }
+
   function contextBanner(): TemplateResult | typeof nothing {
     const label = sharedContextLabel(chatState.scopeId, chatState.contextName);
     if (!label) return nothing;
@@ -966,13 +985,23 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     </div>`;
   }
 
-  function chatHeader(title: string | TemplateResult, detail: string, readOnly: boolean): TemplateResult {
+  /**
+   * `room` is passed in rather than read off `chatState`: the read-only pane clears
+   * `threadRef` before it draws, so looking the roster up here would find nothing and a
+   * room opened read-only would render as an ordinary chat.
+   */
+  function chatHeader(
+    title: string | TemplateResult,
+    detail: string,
+    readOnly: boolean,
+    room: RoomConfig | null = roomFor(chatState.threadRef),
+  ): TemplateResult {
     return html`
       <header class="chat-topbar">
         <div class="chat-heading">
           <div class="chat-title">${title}</div>
           <div class="chat-subtitle">${readOnly ? "Read-only" : detail}</div>
-          ${roomRosterChips(roomFor(chatState.threadRef))}
+          ${roomRosterChips(room)}
         </div>
         <div class="topbar-actions">
           ${

@@ -8,6 +8,10 @@
  *   until its first message lands, so "New room" has nothing to PUT a roster onto. The
  *   picked config is parked here and rides in on the first turn (`drive` in
  *   core-bridge.ts), which is what core persists onto the session it creates.
+ * - **pending room names**, keyed the same way and for the same reason. A room's name is
+ *   an ordinary session title, and a session that does not exist cannot be titled — so the
+ *   name waits here until there is an id to POST it against. It has its own lifecycle: the
+ *   roster rides in on the turn, the name does not, so the two clear independently.
  * - **applied rooms**, also keyed by `threadRef`, so the composer and header can ask
  *   "is the mounted thread a room?" without a round trip.
  * - **refusals**, so a roster core rejected can be shown at the composer instead of
@@ -104,10 +108,52 @@ export function personaRowKey(persona: MessagePersona | undefined | null): strin
 }
 
 // ---------------------------------------------------------------------------
+// Room names
+// ---------------------------------------------------------------------------
+
+/** How many members a derived name lists before it starts counting the rest. */
+const ROOM_NAME_MEMBERS = 3;
+/** Per-name ceiling, so one verbose agent cannot push the roster out of a sidebar row. */
+const ROOM_NAME_PART = 18;
+/** What an unnamed room with no resolvable roster is called. */
+export const FALLBACK_ROOM_NAME = "Room";
+
+function shortMemberName(name: string): string {
+  const trimmed = name.trim();
+  if (trimmed.length <= ROOM_NAME_PART) return trimmed;
+  return `${trimmed.slice(0, ROOM_NAME_PART - 1).trimEnd()}…`;
+}
+
+/**
+ * The name an unnamed room is shown under: "Scout", "Scout & Critic",
+ * "Scout, Critic & Mesh", and past that a count — "Scout, Critic, Mesh & 2 more".
+ * Only ever a display fallback; a room the operator named carries its own title.
+ */
+export function defaultRoomName(names: readonly string[]): string {
+  const parts = names.map(shortMemberName).filter(Boolean);
+  if (!parts.length) return FALLBACK_ROOM_NAME;
+  const shown = parts.slice(0, ROOM_NAME_MEMBERS);
+  const extra = parts.length - shown.length;
+  if (extra > 0) return `${shown.join(", ")} & ${extra} more`;
+  if (shown.length === 1) return shown[0]!;
+  return `${shown.slice(0, -1).join(", ")} & ${shown.at(-1)}`;
+}
+
+/**
+ * Same, resolved through the persona cache. An id the cache has never seen degrades to the
+ * id itself rather than vanishing, so a name is never silently short a member.
+ */
+export function defaultRoomNameFor(room: Pick<RoomConfig, "personaIds"> | null | undefined): string {
+  if (!room?.personaIds.length) return FALLBACK_ROOM_NAME;
+  return defaultRoomName(room.personaIds.map((id) => personaCache.get(id)?.name || id));
+}
+
+// ---------------------------------------------------------------------------
 // Pending + applied room configs
 // ---------------------------------------------------------------------------
 
 const pendingRooms = new Map<string, RoomConfig>();
+const pendingRoomNames = new Map<string, string>();
 const appliedRooms = new Map<string, RoomConfig>();
 
 /** Parks a roster for a thread whose session does not exist server-side yet. */
@@ -122,6 +168,25 @@ export function pendingRoomFor(threadRef: string | null): RoomConfig | null {
 
 export function clearPendingRoom(threadRef: string): void {
   pendingRooms.delete(threadRef);
+}
+
+/**
+ * Parks the name a new room was given until its session exists. A blank name parks nothing:
+ * the room then shows the roster-derived default, which is not worth persisting as a title.
+ */
+export function holdPendingRoomName(threadRef: string, name: string): void {
+  const trimmed = name.trim();
+  if (trimmed) pendingRoomNames.set(threadRef, trimmed);
+  else pendingRoomNames.delete(threadRef);
+}
+
+export function pendingRoomNameFor(threadRef: string | null): string | null {
+  return (threadRef && pendingRoomNames.get(threadRef)) || null;
+}
+
+/** Called only once the title actually landed — a failed attempt leaves it parked to retry. */
+export function clearPendingRoomName(threadRef: string): void {
+  pendingRoomNames.delete(threadRef);
 }
 
 /** Records the room a session read reported (or its absence). */
@@ -165,6 +230,7 @@ export function clearRoomRefusal(threadRef: string | null): void {
 
 export function resetRoomState(): void {
   pendingRooms.clear();
+  pendingRoomNames.clear();
   appliedRooms.clear();
   roomRefusals.clear();
   personaCache.clear();

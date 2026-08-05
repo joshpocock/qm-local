@@ -1,6 +1,7 @@
 /**
  * Agent rooms in the chat surface: the "New room" roster picker, the roster chips in
- * the chat header, and the per-message author chip in the transcript.
+ * the chat header, the roster dots on a sidebar room row, and the per-message author chip
+ * in the transcript.
  *
  * Deliberately imports neither `chat.ts` nor `conversations.ts` — the caller passes in
  * what to do with a chosen roster, which keeps the module out of the conversation
@@ -9,7 +10,7 @@
 
 import { html, nothing, render, type TemplateResult } from "lit";
 import { Users, X } from "lucide";
-import { api, ApiError, updateSessionRoom } from "./core-bridge";
+import { api, ApiError, updateSession, updateSessionRoom } from "./core-bridge";
 import { errMessage, swallow } from "../../chassis/src/errors";
 import { fieldSelect, icon } from "./ui";
 import { AGENT_ROOMS_DISABLED_COPY, type AgentItem } from "./agent-registry";
@@ -17,8 +18,11 @@ import {
   cachePersonas,
   MAX_ROOM_ROUNDS,
   clearPendingRoom,
+  clearPendingRoomName,
+  defaultRoomName,
   DEFAULT_ROOM_ROUNDS,
   pendingRoomFor,
+  pendingRoomNameFor,
   personaChipFor,
   roomConfigError,
   ROOM_ROUNDS,
@@ -37,6 +41,27 @@ function chipStyle(chip: PersonaChip): string {
   return `--persona-color: ${chip.color};`;
 }
 
+/** The coloured square every persona label is built from — chip, author, sidebar dot. */
+function personaDot(chip: PersonaChip): TemplateResult {
+  return html`<span class="persona-dot" style=${chipStyle(chip)}
+    >${chip.glyph ?? chip.name.slice(0, 1).toUpperCase()}</span
+  >`;
+}
+
+function personaChip(chip: PersonaChip, extraClass = ""): TemplateResult {
+  return html`<span class="persona-chip ${extraClass} ${chip.color ? "" : "neutral"}" style=${chipStyle(chip)}>
+    ${personaDot(chip)}<span class="persona-name">${chip.name}</span>
+  </span>`;
+}
+
+/** How many glyphs a sidebar row shows before the rest become a "+N" count. */
+const ROSTER_DOTS_SHOWN = 4;
+
+/** Roster order, resolved through the persona cache; an unknown id degrades to itself. */
+function rosterChips(room: Pick<RoomConfig, "personaIds">): PersonaChip[] {
+  return room.personaIds.map((id) => personaChipFor({ id, name: "" }) ?? { id, name: id });
+}
+
 /**
  * The small author label above an assistant bubble in a room. Renders nothing at all
  * outside rooms, so single-agent conversations look exactly as they do today.
@@ -45,25 +70,35 @@ export function personaAuthorChip(persona: MessagePersona | undefined): Template
   const chip = personaChipFor(persona);
   if (!chip) return nothing;
   return html`<div class="persona-chip persona-author ${chip.color ? "" : "neutral"}" style=${chipStyle(chip)}>
-    <span class="persona-dot">${chip.glyph ?? chip.name.slice(0, 1).toUpperCase()}</span>
-    <span class="persona-name">${chip.name}</span>
+    ${personaDot(chip)}<span class="persona-name">${chip.name}</span>
   </div>`;
 }
 
 /** Roster chips for the chat header, in roster order. */
 export function roomRosterChips(room: RoomConfig | null): TemplateResult | typeof nothing {
   if (!room?.personaIds.length) return nothing;
-  const chips = room.personaIds.map((id) => personaChipFor({ id, name: "" }) ?? { id, name: id });
   return html`<div class="room-roster" title="Agents in this room — each takes a turn in this order">
-    ${chips.map(
-      (chip) =>
-        html`<span class="persona-chip ${chip.color ? "" : "neutral"}" style=${chipStyle(chip)}>
-          <span class="persona-dot">${chip.glyph ?? chip.name.slice(0, 1).toUpperCase()}</span>
-          <span class="persona-name">${chip.name}</span>
-        </span>`,
-    )}
+    ${rosterChips(room).map((chip) => personaChip(chip))}
     <span class="room-rounds">${room.rounds} round${room.rounds === 1 ? "" : "s"}</span>
   </div>`;
+}
+
+/**
+ * The same roster, shrunk to glyphs only, for a sidebar row where there is no width for
+ * names. The names ride along in the tooltip so the row is still readable to a screen
+ * reader and on hover.
+ */
+export function roomRosterDots(room: RoomConfig | null | undefined): TemplateResult | typeof nothing {
+  if (!room?.personaIds.length) return nothing;
+  const chips = rosterChips(room);
+  const label = chips.map((chip) => chip.name).join(", ");
+  const shown = chips.slice(0, ROSTER_DOTS_SHOWN);
+  const extra = chips.length - shown.length;
+  return html`<span class="room-dots" title=${label} aria-label=${`Agents in this room: ${label}`}
+    >${shown.map((chip) => personaDot(chip))}${
+      extra > 0 ? html`<span class="room-dots-more">+${extra}</span>` : nothing
+    }</span
+  >`;
 }
 
 // ---------------------------------------------------------------------------
@@ -71,21 +106,36 @@ export function roomRosterChips(room: RoomConfig | null): TemplateResult | typeo
 // ---------------------------------------------------------------------------
 
 /**
- * Safety net for a roster that never rode in on a turn. The normal path is the first
- * message carrying `room` (core validates and persists it), which clears the pending
- * entry — so this usually finds nothing. It still exists for a thread that acquired a
- * session some other way (a fork, a resumed draft) while its roster was still parked.
- * On failure the config stays parked so the next attempt can retry.
+ * Flushes everything a new room parked against its thread the moment a session id exists.
+ *
+ * The roster is a safety net: the normal path is the first message carrying `room` (core
+ * validates and persists it), which clears the pending entry — so that half usually finds
+ * nothing. It still exists for a thread that acquired a session some other way (a fork, a
+ * resumed draft) while its roster was still parked.
+ *
+ * The name has no such shortcut — a turn carries no title — so this is the only path that
+ * ever applies it. Either half failing leaves its value parked for the next attempt, and
+ * neither is allowed to throw into the chat.
  */
 export async function applyPendingRoom(threadRef: string | null, sessionId: string | null): Promise<void> {
   if (!threadRef || !sessionId) return;
   const config = pendingRoomFor(threadRef);
-  if (!config) return;
-  try {
-    await updateSessionRoom(sessionId, config);
-    clearPendingRoom(threadRef);
-  } catch (e) {
-    swallow("web-ui: apply room roster", e);
+  if (config) {
+    try {
+      await updateSessionRoom(sessionId, config);
+      clearPendingRoom(threadRef);
+    } catch (e) {
+      swallow("web-ui: apply room roster", e);
+    }
+  }
+  const name = pendingRoomNameFor(threadRef);
+  if (name) {
+    try {
+      await updateSession(sessionId, { title: name });
+      clearPendingRoomName(threadRef);
+    } catch (e) {
+      swallow("web-ui: apply room name", e);
+    }
   }
 }
 
@@ -114,11 +164,12 @@ interface RoomDialogState {
   open: boolean;
   loading: boolean;
   agents: AgentItem[];
+  name: string;
   personaIds: string[];
   rounds: number;
   error: string;
   roomsDisabled: boolean;
-  onCreate: ((config: RoomConfig) => void) | null;
+  onCreate: ((config: RoomConfig, name: string) => void) | null;
   opener: HTMLElement | null;
 }
 
@@ -126,6 +177,7 @@ const dialogState: RoomDialogState = {
   open: false,
   loading: false,
   agents: [],
+  name: "",
   personaIds: [],
   rounds: DEFAULT_ROOM_ROUNDS,
   error: "",
@@ -155,6 +207,19 @@ function closeRoomDialog(): void {
   queueMicrotask(() => opener?.isConnected && opener.focus());
 }
 
+/**
+ * What the room will be called. A typed name wins; a blank field falls back to the roster,
+ * resolved off the dialog's own agent list rather than the persona cache — the names are
+ * already in hand here, and the cache may not be warm on a first-ever room.
+ */
+function derivedRoomName(personaIds: readonly string[]): string {
+  return defaultRoomName(personaIds.map((id) => dialogState.agents.find((a) => a.id === id)?.name || id));
+}
+
+function roomNameFromDialog(personaIds: readonly string[]): string {
+  return dialogState.name.trim() || derivedRoomName(personaIds);
+}
+
 function submitRoom(): void {
   const config: RoomConfig = { personaIds: [...dialogState.personaIds], rounds: dialogState.rounds };
   const invalid = roomConfigError(config);
@@ -163,9 +228,10 @@ function submitRoom(): void {
     drawRoomDialog();
     return;
   }
+  const name = roomNameFromDialog(config.personaIds);
   const onCreate = dialogState.onCreate;
   closeRoomDialog();
-  onCreate?.(config);
+  onCreate?.(config, name);
 }
 
 function agentRosterRow(agent: AgentItem): TemplateResult {
@@ -243,9 +309,26 @@ function roomDialogTpl(): TemplateResult {
           </button>
         </div>
         <p class="room-dialog-lead">
-          Pick your agents. Each takes a turn in roster order when you send a message, and can @mention another agent to
-          hand it a follow-up turn.
+          Name the room and pick your agents. Each takes a turn in roster order when you send a message, and can
+          @mention another agent to hand it a follow-up turn.
         </p>
+        <label class="project-name-field room-name-field" for="room-name">
+          <span>Name</span>
+          <input
+            id="room-name"
+            name="name"
+            autofocus
+            maxlength="200"
+            autocomplete="off"
+            placeholder=${derivedRoomName(dialogState.personaIds)}
+            .value=${dialogState.name}
+            ?disabled=${dialogState.roomsDisabled}
+            @input=${(event: InputEvent) => {
+              dialogState.name = (event.currentTarget as HTMLInputElement).value;
+              dialogState.error = "";
+            }}
+          />
+        </label>
         ${rosterBody()}
         <label class="room-rounds-field">
           <span>Rounds</span>
@@ -278,9 +361,9 @@ function roomDialogTpl(): TemplateResult {
                   .value=${String(dialogState.rounds)}
                   ?disabled=${dialogState.roomsDisabled}
                   @input=${(event: Event) => {
-                  dialogState.rounds = Number((event.target as HTMLInputElement).value);
-                  dialogState.error = "";
-                }}
+                    dialogState.rounds = Number((event.target as HTMLInputElement).value);
+                    dialogState.error = "";
+                  }}
                 />`
           }
         </label>
@@ -324,10 +407,15 @@ async function loadRoomAgents(): Promise<void> {
   }
 }
 
-/** Opens the roster picker. `onCreate` receives the chosen config once it validates. */
-export function openRoomDialog(onCreate: (config: RoomConfig) => void): void {
+/**
+ * Opens the roster picker. `onCreate` receives the chosen config once it validates, plus
+ * the room's name — the typed one, or the roster-derived default when the field was left
+ * blank. It is never empty, so callers never have to derive a name themselves.
+ */
+export function openRoomDialog(onCreate: (config: RoomConfig, name: string) => void): void {
   dialogState.opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   dialogState.open = true;
+  dialogState.name = "";
   dialogState.personaIds = [];
   dialogState.rounds = DEFAULT_ROOM_ROUNDS;
   dialogState.error = "";
