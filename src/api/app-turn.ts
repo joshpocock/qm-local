@@ -11,6 +11,7 @@ import {
   panelAddressed,
   panelMembersFrom,
   runPanel,
+  type PanelMember,
   type PanelState,
   type PanelTurnSpec,
 } from "../agents/panel-driver.ts";
@@ -105,6 +106,51 @@ export function createTurnMethods(deps: AppDeps, h: AppHelpers, ambient: Ambient
   }
 
   /**
+   * Agents this human message `@tagged` that the actor can see but the room does not hold yet —
+   * Slack's "mention someone to invite them", in the order they were tagged. Tags are resolved
+   * against the actor's *visible* personas rather than the roster, so a name nobody visible
+   * answers to still matches nothing, and a disabled or archived agent still joins nothing
+   * (`panelMembersFrom` drops both, and `visiblePersonasFor` never lists archived at all).
+   *
+   * A candidate whose name a room member already answers to is skipped: the tag is already
+   * spoken for by the person in the room, and a same-named outsider must not be dragged in
+   * behind it. Two visible strangers sharing a name resolve to the nearer scope, once.
+   *
+   * There is deliberately no size check here: core caps a room's `rounds` (ROOM_MAX_ROUNDS) but
+   * never its roster — `panelMembersFrom` takes every member it is given, and `panelTurnCeiling`
+   * bounds the panel by construction — so joins are unlimited for the same reason rosters are.
+   */
+  async function tagJoiners(
+    text: string | undefined,
+    roomIds: readonly string[],
+    roomMembers: readonly PanelMember[],
+    principalId: string,
+  ): Promise<PanelMember[]> {
+    if (!(text ?? "").includes("@")) return [];
+    const inRoom = new Set(roomIds);
+    const spokenFor = new Set(roomMembers.map((m) => m.name.toLowerCase()));
+    let candidates: PanelMember[];
+    try {
+      candidates = panelMembersFrom(await visiblePersonasFor(deps, h, principalId)).filter(
+        (p) => !inRoom.has(p.id) && !spokenFor.has(p.name.toLowerCase()),
+      );
+    } catch (err) {
+      // Resolving who is visible is not worth failing a human's message over: no join, and the
+      // message runs exactly as it does today.
+      console.error(`[panel] resolving @tag joins failed: ${errMessage(err)}`);
+      return [];
+    }
+    const joiners: PanelMember[] = [];
+    for (const candidate of panelAddressed(text, candidates)) {
+      const key = candidate.name.toLowerCase();
+      if (spokenFor.has(key)) continue;
+      spokenFor.add(key);
+      joiners.push(candidate);
+    }
+    return joiners;
+  }
+
+  /**
    * Runs a bounded panel for a room. Returns null when the roster has no usable agents left,
    * which means "fall through and take this turn the ordinary way". When `persist` is set the
    * config came in on the request, so it is written to the session as soon as the first persona
@@ -114,19 +160,58 @@ export function createTurnMethods(deps: AppDeps, h: AppHelpers, ambient: Ambient
     req: TurnRequest,
     threadRef: string,
     room: RoomConfig,
+    principalId: string,
     persist?: RoomConfig,
   ): Promise<TurnResult | null> {
     const running = activePanels.get(threadRef);
     if (running) running.abort = true;
 
-    const members = panelMembersFrom(await Promise.all(room.personaIds.map((id) => deps.personas.get(id))));
+    const roomMembers = panelMembersFrom(await Promise.all(room.personaIds.map((id) => deps.personas.get(id))));
+    // Tagging a visible agent the room does not hold ADDS it to the room, appended after the
+    // members already there. The enlarged roster is written to the session BEFORE the panel
+    // runs, so a turn that fails halfway cannot cost the room the membership it just gained.
+    const joined = await tagJoiners(req.text, room.personaIds, roomMembers, principalId);
+    // A request-borne config is only written when the session still has none, so a roster
+    // edited meanwhile is never clobbered. A roster enlarged by a join is written regardless:
+    // the join IS the roster change.
+    let persistOverwrites = false;
+    if (joined.length) {
+      const enlarged: RoomConfig = { ...room, personaIds: [...room.personaIds, ...joined.map((m) => m.id)] };
+      let stored = false;
+      try {
+        const session = await deps.sessions.getByThread(threadRef);
+        if (session) {
+          await deps.sessions.setRoom(session.id, enlarged);
+          stored = true;
+          // A roster change is a roster change however it was made: an @tag join is audited
+          // exactly like the PUT that edits a room, so the trail never depends on which
+          // surface someone happened to use.
+          deps.auditLog.record({
+            at: Date.now(),
+            principalId,
+            action: "agent_room_join",
+            resource: session.id,
+            scopeLabel: session.scopeId,
+          });
+        }
+      } catch (err) {
+        console.error(`[panel] thread=${threadRef} persisting joined roster failed: ${errMessage(err)}`);
+      }
+      // No session yet (the first message of a request-borne room) or the write did not land:
+      // the enlarged config rides `persist`, which is retried once the first turn has run.
+      persist = stored ? undefined : enlarged;
+      persistOverwrites = !stored;
+    }
+    const members = joined.length ? [...roomMembers, ...joined] : roomMembers;
     if (!members.length) return null;
-    // The room's roster is what every persona turn is told about; it never changes with a message.
+    // The room's roster is what every persona turn is told about; it changes with a message only
+    // when that message tagged somebody into the room.
     const rosterIds = members.map((m) => m.id);
-    // Addressing the room with `@Name` picks who answers THIS message, in the order tagged.
-    // Tags for agents outside the room match nothing, so a message that tags only strangers
-    // falls back to the whole roster, exactly like a message with no tags at all. Whoever
-    // speaks may still invite anyone else in the room with a mention of their own.
+    // Addressing the room with `@Name` picks who answers THIS message, in the order tagged —
+    // including whoever just joined on this very message. Tags matching nobody visible match
+    // nothing, so a message that tags only strangers falls back to the whole roster, exactly
+    // like a message with no tags at all. Whoever speaks may still invite anyone else in the
+    // (now possibly larger) room with a mention of their own.
     const addressed = panelAddressed(req.text, members);
     const speaking = addressed.length ? addressed : members;
 
@@ -134,7 +219,7 @@ export function createTurnMethods(deps: AppDeps, h: AppHelpers, ambient: Ambient
       if (!persist) return;
       try {
         const session = await deps.sessions.getByThread(threadRef);
-        if (session && !session.room) await deps.sessions.setRoom(session.id, persist);
+        if (session && (persistOverwrites || !session.room)) await deps.sessions.setRoom(session.id, persist);
       } catch (err) {
         console.error(`[panel] thread=${threadRef} persisting room config failed: ${errMessage(err)}`);
       }
@@ -596,7 +681,7 @@ export function createTurnMethods(deps: AppDeps, h: AppHelpers, ambient: Ambient
           persist = validated.room;
         }
         if (roomCfg) {
-          const panelled = await runRoomPanel(req, conversation.threadRef, roomCfg, persist);
+          const panelled = await runRoomPanel(req, conversation.threadRef, roomCfg, actor.id, persist);
           if (panelled) return panelled;
         }
       }

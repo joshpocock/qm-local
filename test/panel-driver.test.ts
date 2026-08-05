@@ -527,6 +527,177 @@ test("a human message that @tags one agent of a two-agent room is answered by th
   );
 });
 
+const lastSeq = async (built: BuiltApp, sessionId: string) =>
+  (await built.sessions.getEntries(sessionId)).at(-1)?.seq ?? -1;
+
+const addedSince = async (built: BuiltApp, sessionId: string, seq: number) =>
+  (await built.sessions.getEntries(sessionId)).filter((e) => e.seq > seq);
+
+const ofType = (entries: readonly SessionEntry[], type: SessionEntry["type"]) => entries.filter((e) => e.type === type);
+
+// ---------------------------------------------------------------------------
+// @tag-to-join: tagging a visible agent the room does not hold adds it to the room.
+// ---------------------------------------------------------------------------
+
+/** Assistant entries added to `sessionId` after `seq`, in order, by persona name. */
+const spokeSince = async (built: BuiltApp, sessionId: string, seq: number) =>
+  (await addedSince(built, sessionId, seq)).filter((e) => e.type === "assistant").map((e) => personaOf(e)?.name);
+
+const roomOf = async (built: BuiltApp, sessionId: string) => (await built.sessions.get(sessionId))!.room;
+
+test("an @tag for a visible agent outside the room adds it to the room and it answers that message", async () => {
+  const built = freshApp();
+  const threadRef = "web:U1:join-1";
+  const { session, personas } = await openRoom(built, threadRef, (ids) => ({ personaIds: ids, rounds: 1 }), [
+    "Scout",
+    "Critic",
+  ]);
+  const nomad = await makePersona(built, "Nomad");
+  assert.deepEqual(
+    (await roomOf(built, session.id))!.personaIds,
+    personas.map((p) => p.id),
+    "Nomad starts outside the room",
+  );
+
+  const before = await lastSeq(built, session.id);
+  const result = await built.app.turn(webTurn(threadRef, "@Nomad take a look at the pricing page"));
+  assert.notEqual(result.status, "refused", result.reason);
+
+  assert.deepEqual(
+    await roomOf(built, session.id),
+    { personaIds: [...personas.map((p) => p.id), nomad.id], rounds: 1 },
+    "the tag added Nomad to the stored roster, appended after the members already there",
+  );
+  assert.deepEqual(await spokeSince(built, session.id, before), ["Nomad"], "and it spoke on the message that added it");
+});
+
+test("a joiner speaks in tag order alongside an existing member when both are tagged", async () => {
+  // `!think ...` is the mock harness's fixed-reply command. Without it the mock echoes the
+  // human's text back, and the echoed tags would hand out mention-granted bonus turns —
+  // real driver behaviour, but noise that has nothing to do with tag ORDER. Each order gets
+  // its own app because persona names are unique per scope.
+  for (const [thread, text, order] of [
+    ["web:U1:join-order-a", "!think @Nomad first, then @Critic", ["Nomad", "Critic"]],
+    ["web:U1:join-order-b", "!think @Critic first, then @Nomad", ["Critic", "Nomad"]],
+  ] as const) {
+    const built = freshApp();
+    const { session, personas } = await openRoom(built, thread, (ids) => ({ personaIds: ids, rounds: 1 }), [
+      "Scout",
+      "Critic",
+    ]);
+    const nomad = await makePersona(built, "Nomad");
+
+    const before = await lastSeq(built, session.id);
+    const result = await built.app.turn(webTurn(thread, text));
+    assert.notEqual(result.status, "refused", result.reason);
+
+    assert.deepEqual(await spokeSince(built, session.id, before), [...order], `tag order, not roster order: ${text}`);
+    assert.deepEqual(
+      (await roomOf(built, session.id))!.personaIds,
+      [...personas.map((p) => p.id), nomad.id],
+      "and the joiner lands at the end of the roster however early it was tagged",
+    );
+  }
+});
+
+test("a tag for an agent that is invisible, disabled, or archived joins nobody and changes nothing", async () => {
+  const built = freshApp();
+  const threadRef = "web:U1:join-2";
+  const { session, personas } = await openRoom(built, threadRef, (ids) => ({ personaIds: ids, rounds: 1 }), [
+    "Scout",
+    "Critic",
+  ]);
+  const stored = { personaIds: personas.map((p) => p.id), rounds: 1 };
+
+  const dormant = await makePersona(built, "Dormant");
+  await built.personas.update(dormant.id, { enabled: false });
+  const filed = await makePersona(built, "Filed");
+  await built.personas.archive(filed.id);
+  // Another principal's personal scope: real, enabled, and none of U1's business.
+  await built.personas.create({
+    scopeId: "personal:U2",
+    name: "Hidden",
+    color: "#ba9926",
+    glyph: "HI",
+    harnessId: "mock",
+    modelId: "claude-opus-4-8",
+    instructions: "You are Hidden.",
+    createdBy: "U2",
+  });
+
+  for (const text of ["@Nobody anyone?", "@Dormant anyone?", "@Filed anyone?", "@Hidden anyone?"]) {
+    const before = await lastSeq(built, session.id);
+    const result = await built.app.turn(webTurn(threadRef, text));
+    assert.notEqual(result.status, "refused", result.reason);
+    assert.deepEqual(await roomOf(built, session.id), stored, `the roster is untouched by "${text}"`);
+    assert.deepEqual(
+      await spokeSince(built, session.id, before),
+      ["Scout", "Critic"],
+      `no tag matched, so "${text}" runs the whole room exactly as it does today`,
+    );
+  }
+});
+
+test("tagging an agent already in the room does not duplicate it in personaIds", async () => {
+  const built = freshApp();
+  const threadRef = "web:U1:join-3";
+  const { session, personas } = await openRoom(built, threadRef, (ids) => ({ personaIds: ids, rounds: 1 }), [
+    "Scout",
+    "Critic",
+  ]);
+
+  const before = await lastSeq(built, session.id);
+  const result = await built.app.turn(webTurn(threadRef, "@Critic and again @Critic"));
+  assert.notEqual(result.status, "refused", result.reason);
+
+  assert.deepEqual(
+    await roomOf(built, session.id),
+    { personaIds: personas.map((p) => p.id), rounds: 1 },
+    "a member is not re-added, and the roster keeps its length",
+  );
+  assert.deepEqual(await spokeSince(built, session.id, before), ["Critic"], "and it is still an ordinary tag");
+});
+
+test("a roster enlarged by a tag persists: the next untagged message runs the whole enlarged room", async () => {
+  const built = freshApp();
+  const threadRef = "web:U1:join-4";
+  const { session, personas } = await openRoom(built, threadRef, (ids) => ({ personaIds: ids, rounds: 1 }), [
+    "Scout",
+    "Critic",
+  ]);
+  const nomad = await makePersona(built, "Nomad");
+
+  assert.notEqual((await built.app.turn(webTurn(threadRef, "@Nomad you should see this"))).status, "refused");
+
+  const before = await lastSeq(built, session.id);
+  const followUp = await built.app.turn(webTurn(threadRef, "so what do you all make of it?"));
+  assert.notEqual(followUp.status, "refused", followUp.reason);
+
+  assert.deepEqual(
+    await spokeSince(built, session.id, before),
+    ["Scout", "Critic", "Nomad"],
+    "the join outlived the message that made it; the room is three agents now",
+  );
+  assert.deepEqual((await roomOf(built, session.id))!.personaIds, [...personas.map((p) => p.id), nomad.id]);
+});
+
+test("a conversation with no room is untouched by a message containing an @tag", async () => {
+  const built = freshApp();
+  const threadRef = "web:U1:join-plain";
+  await built.app.turn(webTurn(threadRef, "hello"));
+  const session = (await built.sessions.getByThread(threadRef))!;
+  await makePersona(built, "Nomad");
+
+  const before = await lastSeq(built, session.id);
+  const result = await built.app.turn(webTurn(threadRef, "@Nomad are you there?"));
+  assert.notEqual(result.status, "refused", result.reason);
+
+  const assistants = ofType(await addedSince(built, session.id, before), "assistant");
+  assert.equal(assistants.length, 1, "one plain turn, not a panel");
+  assert.equal(personaOf(assistants[0]!), undefined, "and it is unattributed");
+  assert.equal(await roomOf(built, session.id), undefined, "a tag never conjures a room out of nothing");
+});
+
 test("a two-round room tells each persona turn where in the panel it is", async () => {
   const built = freshApp();
   const threadRef = "web:U1:room-rounds";
@@ -555,14 +726,6 @@ test("a two-round room tells each persona turn where in the panel it is", async 
 // ---------------------------------------------------------------------------
 // Threading: a panel's replies hang off the human message that started it.
 // ---------------------------------------------------------------------------
-
-const lastSeq = async (built: BuiltApp, sessionId: string) =>
-  (await built.sessions.getEntries(sessionId)).at(-1)?.seq ?? -1;
-
-const addedSince = async (built: BuiltApp, sessionId: string, seq: number) =>
-  (await built.sessions.getEntries(sessionId)).filter((e) => e.seq > seq);
-
-const ofType = (entries: readonly SessionEntry[], type: SessionEntry["type"]) => entries.filter((e) => e.type === type);
 
 test("a one-round room threads both replies under the human message that opened the panel", async () => {
   const built = freshApp();
