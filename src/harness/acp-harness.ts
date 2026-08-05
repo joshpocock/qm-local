@@ -90,7 +90,8 @@ export function acpPermissionDecision(
 ): RequestPermissionResponse {
   if (cancelled) return { outcome: { outcome: "cancelled" } };
   const reject = params.options.find((option) => option.kind === "reject_once" || option.kind === "reject_always");
-  const selected = readOnly || mode === "deny" ? reject : params.options.find((option) => option.kind === "allow_once") ?? reject;
+  const selected =
+    readOnly || mode === "deny" ? reject : (params.options.find((option) => option.kind === "allow_once") ?? reject);
   return selected
     ? { outcome: { outcome: "selected", optionId: selected.optionId } }
     : { outcome: { outcome: "cancelled" } };
@@ -190,7 +191,13 @@ interface AcpRuntime {
   failed: Promise<never>;
 }
 
-function spawnAcpRuntime(command: string, args: string[], env: NodeJS.ProcessEnv, jail: string, client: Client): AcpRuntime {
+function spawnAcpRuntime(
+  command: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  jail: string,
+  client: Client,
+): AcpRuntime {
   const child = spawn(command, args, { cwd: jail, env, stdio: ["pipe", "pipe", "pipe"] });
   let stderr = "";
   child.stderr.setEncoding("utf8");
@@ -413,9 +420,7 @@ export function createAcpHarness(opts: AcpHarnessOptions = {}): Harness {
         );
       }
       if (startTimer) clearTimeout(startTimer);
-      const session = await awaitStage(
-        providerRequest(runtime.connection.newSession({ cwd: jail, mcpServers: [] })),
-      );
+      const session = await awaitStage(providerRequest(runtime.connection.newSession({ cwd: jail, mcpServers: [] })));
       state.sessionId = session.sessionId;
       userEntry = await awaitStage(
         turn.emit({
@@ -432,9 +437,11 @@ export function createAcpHarness(opts: AcpHarnessOptions = {}): Harness {
       const prompt: ContentBlock[] = [
         textBlock(promptText),
         ...(supportsImages
-          ? (turn.images ?? []).map(
-              (image): ContentBlock => ({ type: "image", mimeType: image.mimeType, data: image.dataBase64 }),
-            )
+          ? (turn.images ?? []).map((image): ContentBlock => ({
+              type: "image",
+              mimeType: image.mimeType,
+              data: image.dataBase64,
+            }))
           : []),
       ];
       requestPayload = {
@@ -447,7 +454,9 @@ export function createAcpHarness(opts: AcpHarnessOptions = {}): Harness {
         entryCount: turn.history.length,
       });
       modelCallRecorded = true;
-      const response = await awaitStage(providerRequest(runtime.connection.prompt({ sessionId: state.sessionId, prompt })));
+      const response = await awaitStage(
+        providerRequest(runtime.connection.prompt({ sessionId: state.sessionId, prompt })),
+      );
       const reply = state.replyChunks.join("").trim();
       const thinking = state.thinkingChunks.join("").trim();
       if (thinking) await turn.emit({ type: "thinking", payload: { thinking }, scopeLabel: turn.scopeLabel });
@@ -455,7 +464,11 @@ export function createAcpHarness(opts: AcpHarnessOptions = {}): Harness {
       if (reply) {
         await turn.emit({
           type: "assistant",
-          payload: { text: reply, stopped: stopped || undefined },
+          payload: {
+            text: reply,
+            stopped: stopped || undefined,
+            ...(turn.persona ? { persona: turn.persona } : {}),
+          },
           scopeLabel: turn.scopeLabel,
         });
       }
@@ -464,7 +477,11 @@ export function createAcpHarness(opts: AcpHarnessOptions = {}): Harness {
       if (error !== cancelledError) throw error;
       const reply = state.replyChunks.join("").trim();
       if (reply && userEntry) {
-        await turn.emit({ type: "assistant", payload: { text: reply, stopped: true }, scopeLabel: turn.scopeLabel });
+        await turn.emit({
+          type: "assistant",
+          payload: { text: reply, stopped: true, ...(turn.persona ? { persona: turn.persona } : {}) },
+          scopeLabel: turn.scopeLabel,
+        });
       }
       return { reply, stopped: true, ...(modelCallRecorded ? { modelCalls: 1 } : {}) };
     } finally {

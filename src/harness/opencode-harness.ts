@@ -1012,7 +1012,11 @@ export function createOpenCodeHarness(opts: OpenCodeHarnessOptions = {}): Harnes
       if (reply)
         await turn.emit({
           type: "assistant",
-          payload: { text: reply, stopped: state.stopped || undefined },
+          payload: {
+            text: reply,
+            stopped: state.stopped || undefined,
+            ...(turn.persona ? { persona: turn.persona } : {}),
+          },
           scopeLabel: turn.scopeLabel,
         });
       return {

@@ -175,9 +175,7 @@ function readClaudeCredentials(source: NodeJS.ProcessEnv): string | undefined {
   try {
     parsed = JSON.parse(raw);
   } catch (err) {
-    throw new Error(
-      `Claude credentials are not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    throw new Error(`Claude credentials are not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("Claude credentials must be a JSON object (the contents of ~/.claude/.credentials.json)");
@@ -755,7 +753,11 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
           if (text)
             await turn.emit({
               type: "assistant",
-              payload: { text, ...(stopped ? { stopped: true } : {}) },
+              payload: {
+                text,
+                ...(stopped ? { stopped: true } : {}),
+                ...(turn.persona ? { persona: turn.persona } : {}),
+              },
               scopeLabel: turn.scopeLabel,
             });
           streamedText = "";
@@ -785,7 +787,11 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
         const reply = streamedText.trim();
         await flushThinking();
         if (reply && !ref.silentRequested && !ref.pausedOnApproval)
-          await turn.emit({ type: "assistant", payload: { text: reply, stopped: true }, scopeLabel: turn.scopeLabel });
+          await turn.emit({
+            type: "assistant",
+            payload: { text: reply, stopped: true, ...(turn.persona ? { persona: turn.persona } : {}) },
+            scopeLabel: turn.scopeLabel,
+          });
         return {
           reply: ref.silentRequested || ref.pausedOnApproval ? "" : reply,
           stopped: true,
@@ -805,7 +811,7 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
           if (reply && !terminal)
             await turn.emit({
               type: "assistant",
-              payload: { text: reply, stopped: true },
+              payload: { text: reply, stopped: true, ...(turn.persona ? { persona: turn.persona } : {}) },
               scopeLabel: turn.scopeLabel,
             });
           return {

@@ -228,17 +228,13 @@ export function prepareCodexHome(source: NodeJS.ProcessEnv, jail: string): strin
 export function codexSubscriptionAuth(source: NodeJS.ProcessEnv): string | undefined {
   let raw =
     source.CODEX_AUTH_JSON ??
-    (source.CODEX_AUTH_JSON_B64
-      ? Buffer.from(source.CODEX_AUTH_JSON_B64, "base64").toString("utf8")
-      : undefined);
+    (source.CODEX_AUTH_JSON_B64 ? Buffer.from(source.CODEX_AUTH_JSON_B64, "base64").toString("utf8") : undefined);
   const file = source.CODEX_AUTH_FILE?.trim();
   if (raw === undefined && file) {
     try {
       raw = readFileSync(file, "utf8");
     } catch (err) {
-      throw new Error(
-        `CODEX_AUTH_FILE ${file} could not be read: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      throw new Error(`CODEX_AUTH_FILE ${file} could not be read: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
   if (raw === undefined || raw.trim() === "") return undefined;
@@ -246,9 +242,7 @@ export function codexSubscriptionAuth(source: NodeJS.ProcessEnv): string | undef
   try {
     parsed = JSON.parse(raw);
   } catch (err) {
-    throw new Error(
-      `CODEX_AUTH_JSON is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    throw new Error(`CODEX_AUTH_JSON is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("CODEX_AUTH_JSON must be a JSON object (the contents of ~/.codex/auth.json)");
@@ -878,7 +872,11 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
       if (reply && !terminal)
         await turn.emit({
           type: "assistant",
-          payload: { text: reply, stopped: state.stopped || undefined },
+          payload: {
+            text: reply,
+            stopped: state.stopped || undefined,
+            ...(turn.persona ? { persona: turn.persona } : {}),
+          },
           scopeLabel: turn.scopeLabel,
         });
       return {
