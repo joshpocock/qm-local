@@ -19,7 +19,7 @@ Upstream QM is a genuinely well-designed system with a cloud-first deployment st
   docker logs qm-<org>-auth 2>&1 | grep -A3 "QM SIGN-IN LINK" | tail -4
   ```
 
-- **Codex on your ChatGPT subscription.** `CODEX_AUTH_JSON` / `CODEX_AUTH_JSON_B64` materialize a subscription-mode `auth.json` (the contents of `~/.codex/auth.json` minted by `codex login`), winning over `OPENAI_API_KEY`. For your own instance only — subscriptions are personal; do not serve other users' turns with one. (Claude Code subscriptions already work upstream via `CLAUDE_CODE_OAUTH_TOKEN`.)
+- **Codex on your ChatGPT subscription, auto-detected.** The CLI finds `~/.codex/auth.json` from an existing `codex login` and mounts it; `CODEX_AUTH_FILE` / `CODEX_AUTH_JSON` / `CODEX_AUTH_JSON_B64` also materialize a subscription-mode `auth.json` (the contents of `~/.codex/auth.json` minted by `codex login`), winning over `OPENAI_API_KEY`. For your own instance only — subscriptions are personal; do not serve other users' turns with one. (Claude Code subscriptions already work upstream via `CLAUDE_CODE_OAUTH_TOKEN`.)
 
 - **ACP harness adapter (`HARNESS=acp`).** A fifth harness built on the official `@zed-industries/agent-client-protocol` SDK, so any ACP-speaking agent (Claude Code's ACP bridge, Gemini CLI, and whatever ships next) runs inside QM with its own local auth. Point `ACP_AGENT_CMD` at the agent binary. Streaming, permission-request policy (`ACP_PERMISSION_MODE=auto|deny`, always reject when the turn is read-only), auth-error classification, and cancellation with no orphaned process are covered by tests that drive a real fake agent over the same SDK.
 
