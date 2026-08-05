@@ -252,6 +252,78 @@ export function foldTape(rows: readonly TapeRecord[]): unknown[] {
   return f.out;
 }
 
+/** Identity of the persona a room turn is being folded for. */
+export interface FoldPersona {
+  id: string;
+  name: string;
+}
+
+/** Display name used for assistant rows written before rooms existed (no `meta.author`). */
+export const UNATTRIBUTED_AUTHOR = "Assistant";
+
+/**
+ * Row-level pre-fold rewrite: everything a persona did NOT say stops being its own words.
+ *
+ * - assistant rows whose `meta.author` is this persona: untouched.
+ * - assistant rows from another author (or unattributed): become a `user` row carrying a single
+ *   text block `[<Author>]: <text blocks joined>`, plus a trailing `[<Author> used tools]` line
+ *   when the row had tool calls. Those call ids are recorded so their results can be dropped.
+ * - toolResult rows pairing with a dropped call: removed. Results for the persona's own calls stay.
+ * - user rows, annotations and context_events: passed through so `foldTape` keeps handling
+ *   compaction / legacy import / interrupt exactly as it does outside rooms.
+ */
+function rewriteRowsForPersona(rows: readonly TapeRecord[], persona: FoldPersona): TapeRecord[] {
+  const droppedCallIds = new Set<string>();
+  const out: TapeRecord[] = [];
+  for (const row of rows) {
+    if (row.kind !== "message" || row.payload == null) {
+      out.push(row);
+      continue;
+    }
+    const msg = row.payload as { role?: string; content?: unknown; toolCallId?: unknown; timestamp?: unknown };
+    if (msg.role === "toolResult") {
+      if (typeof msg.toolCallId === "string" && droppedCallIds.has(msg.toolCallId)) continue;
+      out.push(row);
+      continue;
+    }
+    if (msg.role !== "assistant" || row.meta?.author === persona.name) {
+      out.push(row);
+      continue;
+    }
+    const author = row.meta?.author ?? UNATTRIBUTED_AUTHOR;
+    const texts: string[] = [];
+    let usedTools = false;
+    if (Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        const b = block as { type?: string; text?: unknown; id?: unknown };
+        if (b?.type === "text" && typeof b.text === "string") texts.push(b.text);
+        else if (b?.type === "toolCall") {
+          usedTools = true;
+          if (typeof b.id === "string") droppedCallIds.add(b.id);
+        }
+      }
+    }
+    const text = `[${author}]: ${texts.join("\n")}` + (usedTools ? `\n[${author} used tools]` : "");
+    out.push({
+      ...row,
+      payload: {
+        role: "user",
+        content: [{ type: "text", text }],
+        ...(typeof msg.timestamp === "number" ? { timestamp: msg.timestamp } : {}),
+      },
+    });
+  }
+  return out;
+}
+
+/**
+ * `foldTape` from one persona's point of view. With no persona this is `foldTape` verbatim, so a
+ * non-room session is byte-for-byte unaffected.
+ */
+export function foldTapeForPersona(rows: readonly TapeRecord[], persona?: FoldPersona): unknown[] {
+  return foldTape(persona ? rewriteRowsForPersona(rows, persona) : rows);
+}
+
 export function planTapeSeed(
   rows: readonly TapeRecord[],
   harness: string,

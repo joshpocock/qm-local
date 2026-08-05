@@ -1533,6 +1533,8 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
             const callId = role === "toolResult" ? (message as { toolCallId?: unknown }).toolCallId : undefined;
             const resultScope = typeof callId === "string" ? entry.ref.tapeResultScopes?.get(callId) : undefined;
             if (typeof callId === "string") entry.ref.tapeResultScopes?.delete(callId);
+            // In an agent room the persona owns its own words; foldTapeForPersona keys off meta.author.
+            const authored = role === "assistant" && turn.persona ? { meta: { author: turn.persona.name } } : {};
             const rec: NewTapeRecord = {
               kind: "message",
               harness: "pi",
@@ -1546,7 +1548,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
                       ...((turn.triggerTs ?? turn.entryTs) ? { ts: (turn.triggerTs ?? turn.entryTs)! } : {}),
                     },
                   }
-                : {}),
+                : authored),
             };
             tapeTail = tapeTail
               .then(() => turn.tape!(rec))
@@ -1854,7 +1856,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
             const reply = partial.trim() ? partial : "(stopped)";
             const finalEntry = await turn.emit({
               type: "assistant",
-              payload: { text: reply },
+              payload: { text: reply, ...(turn.persona ? { persona: turn.persona } : {}) },
               scopeLabel: turn.scopeLabel,
             });
             await checkpointSubturn(finalEntry.seq);
@@ -1872,7 +1874,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
           const reply = entry.ref.silentRequested ? "" : closingText;
           const finalEntry = await turn.emit({
             type: "assistant",
-            payload: { text: reply },
+            payload: { text: reply, ...(turn.persona ? { persona: turn.persona } : {}) },
             scopeLabel: turn.scopeLabel,
           });
           await checkpointSubturn(finalEntry.seq);
