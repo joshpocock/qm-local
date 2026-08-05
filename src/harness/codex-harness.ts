@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { sanitizeTitle, TITLE_GENERATION_PROMPT } from "./pi-harness.ts";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -226,11 +226,21 @@ export function prepareCodexHome(source: NodeJS.ProcessEnv, jail: string): strin
  * deployment needs the env value re-minted when the refresh token expires.
  */
 export function codexSubscriptionAuth(source: NodeJS.ProcessEnv): string | undefined {
-  const raw =
+  let raw =
     source.CODEX_AUTH_JSON ??
     (source.CODEX_AUTH_JSON_B64
       ? Buffer.from(source.CODEX_AUTH_JSON_B64, "base64").toString("utf8")
       : undefined);
+  const file = source.CODEX_AUTH_FILE?.trim();
+  if (raw === undefined && file) {
+    try {
+      raw = readFileSync(file, "utf8");
+    } catch (err) {
+      throw new Error(
+        `CODEX_AUTH_FILE ${file} could not be read: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
   if (raw === undefined || raw.trim() === "") return undefined;
   let parsed: unknown;
   try {

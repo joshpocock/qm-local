@@ -676,6 +676,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       "OPENAI_API_KEY",
       "OPENAI_BASE_URL",
       "CODEX_ACCESS_TOKEN",
+      // qm-local: reuse an existing `codex login` (see codexSubscriptionAuth).
+      "CODEX_AUTH_JSON",
+      "CODEX_AUTH_JSON_B64",
+      "CODEX_AUTH_FILE",
       "HOME",
       "CODEX_HOME",
     ].flatMap((name) => (env[name] === undefined ? [] : [[name, env[name]]])),

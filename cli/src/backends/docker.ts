@@ -434,6 +434,12 @@ function runArgs(ctx: DockerCtx, service: ServiceName, image: string): { args: s
       args.push("-e", "CLAUDE_CREDENTIALS_FILE=/run/qm/claude-credentials.json");
       note(`claude auth: reusing your local login (${hostClaude})`);
     }
+    const hostCodex = hostCodexAuthPath();
+    if (hostCodex && env.HARNESS === "codex") {
+      args.push("-v", `${hostMountPath(hostCodex)}:/run/qm/codex-auth.json:ro`);
+      args.push("-e", "CODEX_AUTH_FILE=/run/qm/codex-auth.json");
+      note(`codex auth: reusing your local login (${hostCodex})`);
+    }
   }
   if (def.docker.hostPortOffset !== undefined) {
     args.push("-p", `${baseHostPort(ctx) + def.docker.hostPortOffset}:${def.docker.internalPort}`);
@@ -467,6 +473,19 @@ function hostClaudeCredentialsPath(): string | undefined {
     return present[0];
   }
   return undefined;
+}
+
+/** Same idea as the Claude login, for `codex login` (~/.codex/auth.json). */
+function hostCodexAuthPath(): string | undefined {
+  if (process.env.QM_NO_HOST_CODEX_AUTH === "1") return undefined;
+  const explicit = process.env.QM_CODEX_AUTH_FILE?.trim();
+  if (explicit) return existsSync(explicit) ? explicit : undefined;
+  const candidates: string[] = [];
+  const home = process.env.HOME ?? process.env.USERPROFILE;
+  if (home) candidates.push(join(home, ".codex", "auth.json"));
+  const user = process.env.USER ?? process.env.USERNAME;
+  if (user && existsSync("/mnt/c/Users")) candidates.push(join("/mnt/c/Users", user, ".codex", "auth.json"));
+  return candidates.find((path) => existsSync(path));
 }
 
 /** Expiry only; credential values are never read into the CLI's own state. */

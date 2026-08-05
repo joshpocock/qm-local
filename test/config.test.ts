@@ -409,3 +409,30 @@ test("baseModelProviders constrains the base model only when a provider is decla
     "with no declaration the shipped default stands, so upgrading never moves a deployment's model or its billing",
   );
 });
+
+test("subscription credentials survive the per-harness env allowlists", () => {
+  // Regression guard: the harness helpers that materialize an existing login
+  // read these from the env the harness is handed, and loadConfig filters that
+  // env down to an allowlist. A credential dropped here produces a stack that
+  // deploys cleanly and then fails every turn with "not logged in".
+  const claude = loadConfig({
+    CLAUDE_CREDENTIALS_FILE: "/run/qm/claude-credentials.json",
+    CLAUDE_CREDENTIALS_JSON: '{"claudeAiOauth":{}}',
+  }).claudeProcessEnv;
+  assert.equal(claude.CLAUDE_CREDENTIALS_FILE, "/run/qm/claude-credentials.json");
+  assert.equal(claude.CLAUDE_CREDENTIALS_JSON, '{"claudeAiOauth":{}}');
+
+  const codex = loadConfig({
+    CODEX_AUTH_FILE: "/run/qm/codex-auth.json",
+    CODEX_AUTH_JSON: '{"auth_mode":"chatgpt"}',
+    CODEX_AUTH_JSON_B64: "e30=",
+  }).codexProcessEnv;
+  assert.equal(codex.CODEX_AUTH_FILE, "/run/qm/codex-auth.json");
+  assert.equal(codex.CODEX_AUTH_JSON, '{"auth_mode":"chatgpt"}');
+  assert.equal(codex.CODEX_AUTH_JSON_B64, "e30=");
+
+  // and core secrets still never leak into either child environment
+  const leak = loadConfig({ CORE_SIGNING_SECRET: "s", DATABASE_URL: "postgres://x" });
+  assert.equal(leak.claudeProcessEnv.CORE_SIGNING_SECRET, undefined);
+  assert.equal(leak.codexProcessEnv.DATABASE_URL, undefined);
+});
