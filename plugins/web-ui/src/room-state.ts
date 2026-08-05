@@ -140,12 +140,19 @@ export function defaultRoomName(names: readonly string[]): string {
 }
 
 /**
- * Same, resolved through the persona cache. An id the cache has never seen degrades to the
- * id itself rather than vanishing, so a name is never silently short a member.
+ * Same, resolved through the persona cache. Ids the cache has not seen yet — the list paints
+ * before `/api/agents` lands, and an archived member may never resolve — are counted, never
+ * printed: "ap_5e3bafdd-c178-40da…" is worse than useless as a room name. With nothing
+ * resolved at all the room reads as the neutral fallback until the cache warms and the list
+ * repaints.
  */
 export function defaultRoomNameFor(room: Pick<RoomConfig, "personaIds"> | null | undefined): string {
   if (!room?.personaIds.length) return FALLBACK_ROOM_NAME;
-  return defaultRoomName(room.personaIds.map((id) => personaCache.get(id)?.name || id));
+  const known = room.personaIds.map((id) => personaCache.get(id)?.name).filter((name): name is string => Boolean(name));
+  if (!known.length) return FALLBACK_ROOM_NAME;
+  const missing = room.personaIds.length - known.length;
+  const named = defaultRoomName(known);
+  return missing > 0 ? `${named} & ${missing} more` : named;
 }
 
 // ---------------------------------------------------------------------------

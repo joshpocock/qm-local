@@ -1191,10 +1191,15 @@ export async function refreshSessions(
   try {
     const r = await api<{ sessions: CoreSession[] }>("/api/sessions");
     if (seq !== sessionRefreshSeq) return false;
+    let sawRoom = false;
     for (const session of r.sessions ?? []) {
       noteRoom(session.threadRef, session.room ?? null);
-      if (session.room) void ensureRoomPersonas();
+      if (session.room) sawRoom = true;
     }
+    // Room rows are drawn from the persona cache, which is empty on the first paint after a
+    // reload — so warm it and draw again, or the sidebar keeps the nameless, glyphless
+    // version it rendered before /api/agents landed.
+    if (sawRoom) void ensureRoomPersonas().then(() => renderList());
     sessionsState.list = reconcileSessions(r.sessions ?? [], sessionsState.list);
     sessionsState.loaded = true;
     sessionsNotice = "";

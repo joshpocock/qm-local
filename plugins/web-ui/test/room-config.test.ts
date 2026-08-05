@@ -185,14 +185,19 @@ test("a nameless roster still has something to be called", () => {
   assert.equal(defaultRoomName(["  Scout  ", "Critic"]), "Scout & Critic", "and real ones are trimmed");
 });
 
-test("the derived name resolves ids through the persona cache, and never drops a member", () => {
+test("the derived name resolves ids through the persona cache, and never prints a raw id", () => {
   resetRoomState();
   cachePersonas([makeAgent("ap_1", "Scout"), makeAgent("ap_2", "Critic")]);
   assert.equal(defaultRoomNameFor({ personaIds: ["ap_1", "ap_2"] }), "Scout & Critic");
   assert.equal(
     defaultRoomNameFor({ personaIds: ["ap_1", "ap_unknown"] }),
-    "Scout & ap_unknown",
-    "an id the cache has never seen shows as itself rather than vanishing",
+    "Scout & 1 more",
+    "an unresolved id is counted, never shown — a raw ap_… id is worse than useless as a name",
+  );
+  assert.equal(
+    defaultRoomNameFor({ personaIds: ["ap_unknown", "ap_other"] }),
+    "Room",
+    "and with nothing resolved the room reads neutrally until the cache warms",
   );
   assert.equal(defaultRoomNameFor(null), "Room");
   assert.equal(defaultRoomNameFor({ personaIds: [] }), "Room");
