@@ -880,3 +880,24 @@ test("an invalid request-borne room is refused, not silently degraded", async ()
     "a refused first message creates no session",
   );
 });
+
+test("a PASS reply never reaches the transcript — it is a signal, not something anyone said", async () => {
+  const built = freshApp();
+  const threadRef = "web:U1:room-pass";
+  const { session } = await openRoom(built, threadRef, (ids) => ({ personaIds: ids, rounds: 1 }), ["Quiet", "Talker"]);
+
+  // The mock harness echoes the turn input, so a room whose agents are told to reply PASS
+  // gives us a real PASS-shaped turn through the whole emit path.
+  const before = await built.sessions.getEntries(session.id);
+  await built.app.turn(webTurn(threadRef, PANEL_PASS));
+  const added = (await built.sessions.getEntries(session.id)).filter((e) => e.seq > (before.at(-1)?.seq ?? -1));
+
+  const assistantTexts = added
+    .filter((e) => e.type === "assistant")
+    .map((e) => String((e.payload as { text?: string }).text ?? "").trim());
+  assert.equal(
+    assistantTexts.some((t) => t === PANEL_PASS),
+    false,
+    "no stored assistant entry is the bare word PASS",
+  );
+});

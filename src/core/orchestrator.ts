@@ -74,7 +74,7 @@ import { createToolContext, NeedsApproval, CommandDenied } from "../tools/primit
 import type { BrokeredLayerTool } from "../deployment/load-layer.ts";
 import type { FileArtifact } from "../files/file-artifact-store.ts";
 import { filterHistoryForAudience, principalEntitledToScope } from "../resolution/context-filter.ts";
-import { renderPanelSystemBlock } from "../agents/panel-driver.ts";
+import { PANEL_PASS, renderPanelSystemBlock } from "../agents/panel-driver.ts";
 import type { AgentPersona } from "../agents/persona-store.ts";
 import {
   filterTapeForAudience,
@@ -2242,6 +2242,25 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               return withManagedRosterVersion(() => deps.sessions.appendTape(lease, { ...rec, meta }));
             },
             emit: async (entry) => {
+              // "PASS" is how a persona says it has nothing to add. It is a signal to the
+              // driver, not something anybody said, so it never reaches the transcript —
+              // otherwise a quiet room fills with the word PASS, and the session auto-titler
+              // happily names the room after it.
+              if (
+                input.panel &&
+                entry.type === "assistant" &&
+                String((entry.payload as { text?: string } | null)?.text ?? "").trim() === PANEL_PASS
+              ) {
+                return {
+                  sessionId: session.id,
+                  seq: maxEntrySeq,
+                  parentSeq: null,
+                  type: "assistant" as const,
+                  payload: entry.payload,
+                  scopeLabel: entry.scopeLabel,
+                  createdAt: Date.now(),
+                };
+              }
               if (panelContinuation && entry.type === "user") {
                 // Not persisted: hand the adapter an unsaved stand-in so the code that keys
                 // LLM-request records off the trigger entry keeps working, pointed at the last
