@@ -7097,3 +7097,12 @@ h3.ambient-field-label {
   margin: 6px 0 0;
   line-height: 1.5;
 }
+
+.composer-error.room-refusal {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.composer-error.room-refusal > span {
+  min-width: 0;
+}

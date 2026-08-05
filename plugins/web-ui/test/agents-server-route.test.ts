@@ -35,6 +35,8 @@ const agent = {
 
 /** Set by a test to make the next core reply a 404, the way the feature flag being off looks. */
 let flagOff = false;
+/** Set by a test to make core refuse the turn the way an unusable roster does. */
+let refuseTurn = "";
 
 const core = createServer((req: IncomingMessage, res) => {
   let raw = "";
@@ -47,7 +49,15 @@ const core = createServer((req: IncomingMessage, res) => {
       res.end(JSON.stringify({ error: "not_found" }));
       return;
     }
+    if (refuseTurn && (req.url ?? "").startsWith("/v1/turns")) {
+      res.writeHead(403, { "content-type": "application/json" });
+      res.end(JSON.stringify({ status: "refused", reason: refuseTurn }));
+      return;
+    }
     res.writeHead(200, { "content-type": "application/json" });
+    if ((req.url ?? "").startsWith("/v1/turns")) {
+      return void res.end(JSON.stringify({ status: "queued", runId: "run_1" }));
+    }
     if ((req.url ?? "").includes("/room")) return void res.end(JSON.stringify({ session: { id: "s1" } }));
     if (req.method === "GET" && new URL(req.url ?? "", "http://core").pathname === "/v1/agents") {
       return void res.end(JSON.stringify({ agents: [agent] }));
@@ -189,6 +199,62 @@ test("an unusable roster is rejected at the relay instead of reaching core", asy
     });
     assert.equal(r.status, 400, `rejected: ${JSON.stringify(room)}`);
     assert.equal(since(before, "/v1/sessions/s1/room"), undefined, "nothing reaches core");
+  }
+});
+
+test("the first message of a new room carries its roster through to core's turn", async () => {
+  const before = calls.length;
+  const r = await fetch(`${base}/api/turn`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      text: "Scout, find the weak points.",
+      threadRef: "web:alice:t1",
+      room: { personaIds: ["ap_1", "ap_2"], rounds: 2 },
+    }),
+  });
+  assert.equal(r.status, 200);
+  const call = since(before, "/v1/turns");
+  assert.ok(call, "the turn must reach core");
+  assert.deepEqual(call.body.room, { personaIds: ["ap_1", "ap_2"], rounds: 2 });
+  assert.equal(call.body.text, "Scout, find the weak points.");
+});
+
+test("an ordinary turn carries no room key at all", async () => {
+  const before = calls.length;
+  await fetch(`${base}/api/turn`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ text: "hello", threadRef: "web:alice:t2" }),
+  });
+  assert.equal("room" in (since(before, "/v1/turns")?.body ?? {}), false);
+});
+
+test("a malformed roster on a turn is rejected at the relay instead of reaching core", async () => {
+  for (const room of [null, { personaIds: [], rounds: 1 }, { personaIds: ["a"], rounds: 9 }, "roster"]) {
+    const before = calls.length;
+    const r = await fetch(`${base}/api/turn`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ text: "hi", threadRef: "web:alice:t3", room }),
+    });
+    assert.equal(r.status, 400, `rejected: ${JSON.stringify(room)}`);
+    assert.equal(since(before, "/v1/turns"), undefined, "nothing reaches core");
+  }
+});
+
+test("core refusing a roster comes back as a 403 that still carries the reason", async () => {
+  refuseTurn = "agent Critic is disabled";
+  try {
+    const r = await fetch(`${base}/api/turn`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ text: "go", threadRef: "web:alice:t4", room: { personaIds: ["ap_1"], rounds: 1 } }),
+    });
+    assert.equal(r.status, 403);
+    assert.deepEqual(await r.json(), { status: "refused", reason: "agent Critic is disabled" });
+  } finally {
+    refuseTurn = "";
   }
 });
 

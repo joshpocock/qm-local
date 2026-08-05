@@ -1,7 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { entriesToMessages, personaFromPayload, type AssistantWork, type SessionEntry } from "../src/core-bridge.ts";
+import {
+  ApiError,
+  entriesToMessages,
+  personaFromPayload,
+  refusalReason,
+  type AssistantWork,
+  type SessionEntry,
+} from "../src/core-bridge.ts";
 import {
   cachePersonas,
   clearPersonaCache,
@@ -11,11 +18,14 @@ import {
   noteRoom,
   pendingRoomFor,
   clearPendingRoom,
+  clearRoomRefusal,
+  noteRoomRefusal,
   personaChipFor,
   personaRowKey,
   resetRoomState,
   roomConfigError,
   roomFor,
+  roomRefusalFor,
   toggleRosterMember,
 } from "../src/room-state.ts";
 import type { AgentItem } from "../src/agent-registry.ts";
@@ -139,6 +149,39 @@ test("a session read that has not caught up yet cannot drop a roster still await
 });
 
 // ---------------------------------------------------------------------------
+// Refused rosters
+// ---------------------------------------------------------------------------
+
+test("only a refused turn carrying a reason counts as a roster refusal", () => {
+  assert.equal(
+    refusalReason(new ApiError("HTTP 403", 403, { status: "refused", reason: "agent Critic is disabled" })),
+    "agent Critic is disabled",
+  );
+  assert.equal(refusalReason(new ApiError("HTTP 403", 403, { status: "refused" })), null, "no reason to show");
+  assert.equal(refusalReason(new ApiError("HTTP 403", 403, { error: "forbidden_scope" })), null, "not a refusal");
+  assert.equal(refusalReason(new ApiError("HTTP 500", 500, { status: "refused", reason: "x" })), null, "wrong status");
+  assert.equal(refusalReason(new Error("network down")), null);
+  assert.equal(refusalReason(null), null);
+});
+
+test("a refusal is remembered per thread and stays dismissible", () => {
+  resetRoomState();
+  assert.equal(roomRefusalFor("web:alice:t4"), null);
+  noteRoomRefusal("web:alice:t4", "unknown agent: ap_9");
+  assert.equal(roomRefusalFor("web:alice:t4"), "unknown agent: ap_9");
+  assert.equal(roomRefusalFor("web:alice:other"), null, "a refusal belongs to one thread only");
+  clearRoomRefusal("web:alice:t4");
+  assert.equal(roomRefusalFor("web:alice:t4"), null);
+});
+
+test("a refused roster stays parked so fixing the agent and resending retries it", () => {
+  resetRoomState();
+  holdPendingRoom("web:alice:t5", { personaIds: ["ap_1"], rounds: 1 });
+  noteRoomRefusal("web:alice:t5", "agent Critic is disabled");
+  assert.deepEqual(pendingRoomFor("web:alice:t5"), { personaIds: ["ap_1"], rounds: 1 });
+});
+
+// ---------------------------------------------------------------------------
 // Attribution through the transcript
 // ---------------------------------------------------------------------------
 
@@ -219,7 +262,7 @@ test("a room's header shows the roster and its composer hides the per-thread run
   assert.match(composer, /\$\{\s*\n?\s*roomThread\(\)\s*\n?\s*\? nothing/, "…and so do the ones in the settings menu");
 });
 
-test("a held roster is applied the moment the first message gives the thread a session id", () => {
+test("a held roster is still applied if a thread gets a session id without carrying it on a turn", () => {
   const adopt = chat.slice(chat.indexOf("function adoptActiveSessionFromList"));
   const body = adopt.slice(0, adopt.indexOf("\n  }"));
   assert.match(body, /void applyPendingRoom\(chatState\.threadRef, chatState\.sessionId\);/);
@@ -227,4 +270,39 @@ test("a held roster is applied the moment the first message gives the thread a s
     body.indexOf("chatState.sessionId = match.id") < body.indexOf("applyPendingRoom"),
     "the id must be adopted before the roster is applied",
   );
+});
+
+const bridge = readFileSync(new URL("../src/core-bridge.ts", import.meta.url), "utf8");
+
+test("a new room's roster rides in on its first turn, and not on openers or approvals", () => {
+  assert.match(bridge, /const roomForTurn = opener \|\| approval \? null : pendingRoomFor\(threadRef\);/);
+  assert.match(bridge, /\.\.\.\(roomForTurn \? \{ room: roomForTurn \} : \{\}\),/, "the turn body carries it");
+  const submitAt = bridge.indexOf('api<{ status?: string; runId?: string; reply?: string }>("/api/turn"');
+  assert.ok(bridge.indexOf("const roomForTurn") < submitAt, "resolved before the turn is submitted");
+});
+
+test("an accepted roster stops being pending, so the deferred PUT never fires for that path", () => {
+  assert.match(bridge, /if \(roomForTurn\) clearPendingRoom\(threadRef\);/);
+  const clearAt = bridge.indexOf("if (roomForTurn) clearPendingRoom(threadRef);");
+  const followAt = bridge.indexOf("await followRun(stream, partial, submit.runId");
+  assert.ok(clearAt > 0 && clearAt < followAt, "cleared only after the submit came back without throwing");
+});
+
+test("a refused roster leaves no failed assistant turn in the transcript", () => {
+  const drive = bridge.slice(bridge.indexOf("const roomForTurn"));
+  const body = drive.slice(0, drive.indexOf("\n}\n"));
+  assert.match(body, /const refused = roomForTurn \? refusalReason\(e\) : null;/, "only a room turn can refuse a room");
+  assert.match(body, /noteRoomRefusal\(threadRef, refused\);/);
+  assert.ok(
+    body.indexOf("noteRoomRefusal") < body.indexOf("fail(stream, partial"),
+    "the refusal path must return before the ordinary failure path",
+  );
+  assert.match(body, /clearRoomRefusal\(threadRef\);/, "each new send clears the previous refusal");
+});
+
+test("the refusal is surfaced at the composer, with its reason and a way to dismiss it", () => {
+  assert.match(composer, /const refusal = roomRefusalFor\(ctx\.chat\.state\.threadRef\);/);
+  assert.match(composer, /composer-error room-refusal/, "it renders in the composer's own error slot");
+  assert.match(composer, /This room could not start: \$\{refusal\}/);
+  assert.match(composer, /clearRoomRefusal\(ctx\.chat\.state\.threadRef\);/, "and can be dismissed");
 });

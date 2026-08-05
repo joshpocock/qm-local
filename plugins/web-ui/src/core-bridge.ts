@@ -5,7 +5,14 @@ import { swallow } from "../../chassis/src/errors.ts";
 import { groupDmText } from "./group-dm-label.ts";
 import { base64ToBytes } from "./paste-text.ts";
 import { defaultEffortForModel, harnessSupportsEffort } from "./model-options.ts";
-import type { MessagePersona, RoomConfig } from "./room-state.ts";
+import {
+  clearPendingRoom,
+  clearRoomRefusal,
+  noteRoomRefusal,
+  pendingRoomFor,
+  type MessagePersona,
+  type RoomConfig,
+} from "./room-state.ts";
 
 const BASE_URL = ((import.meta as unknown as { env?: { BASE_URL?: string } }).env?.BASE_URL ?? "/").replace(/\/$/, "");
 
@@ -141,9 +148,9 @@ export async function updateSession(
 }
 
 /**
- * Sets (or clears, with `null`) the persona roster on an existing session. Web threads
- * only exist server-side once their first message lands, so callers hold the config in
- * `room-state` until a session id is known and then apply it here.
+ * Sets (or clears, with `null`) the persona roster on an existing session — editing a room
+ * that already exists. A brand-new room does not come through here: it rides its roster in
+ * on the first turn (`drive`), because the session does not exist until that turn creates it.
  */
 export async function updateSessionRoom(id: string, room: RoomConfig | null): Promise<{ session: CoreSession }> {
   return api<{ session: CoreSession }>(`/api/sessions/${encodeURIComponent(id)}/room`, {
@@ -601,6 +608,12 @@ async function drive(
       ? (turnOptions.effortLevel ?? agent.state.thinkingLevel ?? defaultEffortForModel(model))
       : undefined;
   const timezone = browserTimezone();
+  // The first message of a brand-new room carries its roster: there is no session yet for
+  // `PUT /v1/sessions/:id/room` to attach it to, and core persists it onto the session the
+  // first persona turn creates. Not on openers or approval turns — neither is a human
+  // message, and core only reads `room` off a person-typed turn.
+  const roomForTurn = opener || approval ? null : pendingRoomFor(threadRef);
+  clearRoomRefusal(threadRef);
   try {
     notify();
     stream.push({ type: "start", partial });
@@ -615,6 +628,7 @@ async function drive(
       body: JSON.stringify({
         text,
         threadRef,
+        ...(roomForTurn ? { room: roomForTurn } : {}),
         ...(turnOptions.harness ? { harness: turnOptions.harness } : {}),
         model: model.id,
         ...(thinkingLevel ? { thinkingLevel } : {}),
@@ -627,6 +641,9 @@ async function drive(
         ...(opener ? { proactiveOpener: true } : {}),
       }),
     });
+
+    // Core accepted the roster and owns it from here, so the deferred PUT is not needed.
+    if (roomForTurn) clearPendingRoom(threadRef);
 
     if (submit.runId) {
       await followRun(stream, partial, submit.runId, signal, notify, undefined, slot);
@@ -641,8 +658,29 @@ async function drive(
     work.status = "failed";
     work.finishedAt = Date.now();
     notify();
+    // A refused roster means no persona ever spoke. Record it for the composer and end the
+    // stream with nothing rather than leaving a failed assistant turn nobody took.
+    const refused = roomForTurn ? refusalReason(e) : null;
+    if (refused) {
+      noteRoomRefusal(threadRef, refused);
+      work.status = "complete";
+      finish(stream, partial, { acc: "", lastProgressAt: now() }, "");
+      return;
+    }
     fail(stream, partial, e instanceof Error ? e.message : String(e));
   }
+}
+
+/**
+ * The `reason` off a refused turn (`403` + `{ status: "refused", reason }`). Anything else —
+ * a network blip, a 500, a refusal with no reason — returns null so the caller falls back to
+ * its ordinary error path.
+ */
+export function refusalReason(e: unknown): string | null {
+  if (!(e instanceof ApiError) || e.status !== 403) return null;
+  const body = e.body as { status?: unknown; reason?: unknown } | null;
+  if (!body || body.status !== "refused") return null;
+  return typeof body.reason === "string" && body.reason ? body.reason : null;
 }
 
 async function resumeDrive(

@@ -1560,6 +1560,8 @@ const routeRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const attachments: CoreAttachment[] = [];
       let approval: { requestId: string; approved: boolean; scope?: string } | undefined;
       let proactiveOpener = false;
+      let room: { personaIds: string[]; rounds: number } | undefined;
+      let badRoom = false;
       try {
         const p = JSON.parse(await readBody(req));
         text = String(p.text ?? "");
@@ -1581,6 +1583,13 @@ const routeRequest = async (req: IncomingMessage, res: ServerResponse) => {
         if (typeof p.thinkingLevel === "string") thinkingLevel = p.thinkingLevel;
         if (typeof p.fastMode === "boolean") fastMode = p.fastMode;
         if (typeof p.timezone === "string" && p.timezone.trim()) timezone = p.timezone.trim().slice(0, 64);
+        // A roster on the first message of a brand-new room. Same normaliser the PUT route
+        // uses; `null` is meaningless here (there is no roster to clear yet), so it is junk.
+        if (p.room !== undefined) {
+          const normalised = roomFromBody(p as { room?: unknown });
+          if (normalised) room = normalised;
+          else badRoom = true;
+        }
         if (Array.isArray(p.attachments)) {
           for (const raw of p.attachments as unknown[]) {
             if (!raw || typeof raw !== "object") continue;
@@ -1596,6 +1605,12 @@ const routeRequest = async (req: IncomingMessage, res: ServerResponse) => {
         }
       } catch (e) {
         if (e instanceof PayloadTooLargeError) throw e;
+      }
+      if (badRoom) {
+        return json(res, 400, {
+          error: "bad_request",
+          message: `room must be a roster of 1-${ROOM_MAX_PERSONAS} unique agents over 1-3 rounds`,
+        });
       }
       if (!text.trim() && attachments.length === 0 && !approval && !proactiveOpener)
         return json(res, 400, { error: "empty message" });
@@ -1631,6 +1646,7 @@ const routeRequest = async (req: IncomingMessage, res: ServerResponse) => {
         ...(attachments.length ? { attachments } : {}),
         ...(approval ? { approval } : {}),
         ...(proactiveOpener ? { proactiveOpener: true } : {}),
+        ...(room ? { room } : {}),
       };
       return postTurnAndMint(res, turn, user, threadRef);
     }

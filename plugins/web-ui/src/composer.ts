@@ -49,7 +49,7 @@ import { bumpSessionActivity, dropPendingSession, renderList } from "./sessions"
 import { adminSessionLogUrl, appState, can } from "./shell";
 import { base64ToText, bytesToBase64, insertIntoDraft, pasteChipLabel } from "./paste-text";
 import { clearDraft, newChatDraftKey, saveDraft } from "./drafts";
-import { isRoomThread } from "./room-state";
+import { clearRoomRefusal, isRoomThread, roomRefusalFor } from "./room-state";
 
 export type ComposerMenu = "effort" | "harness" | "model" | "settings";
 
@@ -368,6 +368,24 @@ export function createComposerSurface(ctx: ConvCtx): ComposerSurface {
         : html`<div class="composer-note">Loading runtime settings…</div>`;
     } else if (composerState.error) {
       composerNotice = html`<div class="composer-error">${composerState.error}</div>`;
+    } else {
+      // A roster core refused on the first message. It sits here rather than in the
+      // transcript because no persona ever took a turn, and the fix is the human's.
+      const refusal = roomRefusalFor(ctx.chat.state.threadRef);
+      if (refusal) {
+        composerNotice = html`<div class="composer-error room-refusal">
+          <span>This room could not start: ${refusal}</span>
+          <button
+            type="button"
+            @click=${() => {
+              clearRoomRefusal(ctx.chat.state.threadRef);
+              ctx.chat.drawActiveChat(agent);
+            }}
+          >
+            Dismiss
+          </button>
+        </div>`;
+      }
     }
     return html`
       <form class="composer-wrap" @submit=${(e: Event) => submitComposer(e, agent)}>
@@ -524,57 +542,57 @@ export function createComposerSurface(ctx: ConvCtx): ComposerSurface {
                   ? nothing
                   : html`
                       ${
-                      modelToggled
-                        ? html`<button
-                            class="runtime-default-btn"
-                            type="button"
-                            aria-label="Make default"
-                            data-mobile-label="Default"
-                            title="Use this harness and model as the default for this scope"
-                            ?disabled=${inputBlocked}
-                            @click=${() => changeScopeRuntime({ harnessId: selectedModel.harnessId, modelId: selectedModel.model.id }, agent)}
-                          >
-                            Make default
-                          </button>`
-                        : nothing
-                    }
+                        modelToggled
+                          ? html`<button
+                              class="runtime-default-btn"
+                              type="button"
+                              aria-label="Make default"
+                              data-mobile-label="Default"
+                              title="Use this harness and model as the default for this scope"
+                              ?disabled=${inputBlocked}
+                              @click=${() => changeScopeRuntime({ harnessId: selectedModel.harnessId, modelId: selectedModel.model.id }, agent)}
+                            >
+                              Make default
+                            </button>`
+                          : nothing
+                      }
                       ${
-                      modelToggled && activeRuntimeConfig?.scopeOverride
-                        ? html`<button
-                            class="runtime-default-btn"
-                            type="button"
-                            aria-label="Use org default"
-                            data-mobile-label="Org default"
-                            ?disabled=${inputBlocked}
-                            @click=${() => changeScopeRuntime({ inherit: true }, agent)}
-                          >
-                            Use org default
-                          </button>`
-                        : nothing
-                    }
+                        modelToggled && activeRuntimeConfig?.scopeOverride
+                          ? html`<button
+                              class="runtime-default-btn"
+                              type="button"
+                              aria-label="Use org default"
+                              data-mobile-label="Org default"
+                              ?disabled=${inputBlocked}
+                              @click=${() => changeScopeRuntime({ inherit: true }, agent)}
+                            >
+                              Use org default
+                            </button>`
+                          : nothing
+                      }
                       ${menuControl({
-                      kind: "model",
-                      label: selectedModel.buttonLabel,
-                      title: "Model",
-                      selected: selectedModel.value,
-                      align: "right",
-                      options: getModelOptionsForHarness(selectedModel.harnessId, scopeKey()).map((option) => ({
-                        value: option.value,
-                        label: option.label,
-                      })),
-                      disabled: inputBlocked,
-                      onSelect: (value: string) => selectModel(value, agent),
-                    })}
+                        kind: "model",
+                        label: selectedModel.buttonLabel,
+                        title: "Model",
+                        selected: selectedModel.value,
+                        align: "right",
+                        options: getModelOptionsForHarness(selectedModel.harnessId, scopeKey()).map((option) => ({
+                          value: option.value,
+                          label: option.label,
+                        })),
+                        disabled: inputBlocked,
+                        onSelect: (value: string) => selectModel(value, agent),
+                      })}
                       ${menuControl({
-                      kind: "harness",
-                      label: selectedModel.harnessLabel,
-                      title: "Harness",
-                      selected: selectedModel.harnessId,
-                      align: "right",
-                      options: getHarnessOptions(scopeKey()),
-                      disabled: inputBlocked,
-                      onSelect: (value: string) => selectHarness(value, agent),
-                    })}
+                        kind: "harness",
+                        label: selectedModel.harnessLabel,
+                        title: "Harness",
+                        selected: selectedModel.harnessId,
+                        align: "right",
+                        options: getHarnessOptions(scopeKey()),
+                        disabled: inputBlocked,
+                        onSelect: (value: string) => selectHarness(value, agent),
+                      })}
                     `
             }
             ${sendControls(agent)}
@@ -774,35 +792,35 @@ export function createComposerSurface(ctx: ConvCtx): ComposerSurface {
                       : html`
                           <div class="menu-title">Model</div>
                           ${getModelOptionsForHarness(selected.harnessId, scopeKey()).map(
-                    (option) => html`
-                      <button
-                        class="menu-option ${option.value === selected.value ? "active" : ""}"
-                        type="button"
-                        role="menuitemradio"
-                        aria-checked=${option.value === selected.value ? "true" : "false"}
-                        @click=${() => selectModel(option.value, agent)}
-                      >
-                        <span class="menu-option-copy">
-                          <span class="menu-option-label">${option.label}</span>
-                        </span>
-                        ${option.value === selected.value ? icon(Check, 15) : nothing}
-                      </button>
-                    `,
-                  )}
+                            (option) => html`
+                              <button
+                                class="menu-option ${option.value === selected.value ? "active" : ""}"
+                                type="button"
+                                role="menuitemradio"
+                                aria-checked=${option.value === selected.value ? "true" : "false"}
+                                @click=${() => selectModel(option.value, agent)}
+                              >
+                                <span class="menu-option-copy">
+                                  <span class="menu-option-label">${option.label}</span>
+                                </span>
+                                ${option.value === selected.value ? icon(Check, 15) : nothing}
+                              </button>
+                            `,
+                          )}
                           <div class="menu-title">Harness</div>
                           <div class="settings-seg" role="group" aria-label="Harness">
                             ${getHarnessOptions(scopeKey()).map(
-                      (option) => html`
-                        <button
-                          class="settings-chip ${option.value === selected.harnessId ? "active" : ""}"
-                          type="button"
-                          aria-pressed=${option.value === selected.harnessId ? "true" : "false"}
-                          @click=${() => selectHarness(option.value, agent)}
-                        >
-                          ${option.label}
-                        </button>
-                      `,
-                    )}
+                              (option) => html`
+                                <button
+                                  class="settings-chip ${option.value === selected.harnessId ? "active" : ""}"
+                                  type="button"
+                                  aria-pressed=${option.value === selected.harnessId ? "true" : "false"}
+                                  @click=${() => selectHarness(option.value, agent)}
+                                >
+                                  ${option.label}
+                                </button>
+                              `,
+                            )}
                           </div>
                         `
                   }

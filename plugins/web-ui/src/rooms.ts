@@ -71,9 +71,11 @@ export function roomRosterChips(room: RoomConfig | null): TemplateResult | typeo
 // ---------------------------------------------------------------------------
 
 /**
- * Web threads have no server-side session until the first message lands, so "New room"
- * parks the roster against the thread ref. This applies it the moment a session id
- * appears; on failure the config stays parked so the next attempt can retry.
+ * Safety net for a roster that never rode in on a turn. The normal path is the first
+ * message carrying `room` (core validates and persists it), which clears the pending
+ * entry — so this usually finds nothing. It still exists for a thread that acquired a
+ * session some other way (a fork, a resumed draft) while its roster was still parked.
+ * On failure the config stays parked so the next attempt can retry.
  */
 export async function applyPendingRoom(threadRef: string | null, sessionId: string | null): Promise<void> {
   if (!threadRef || !sessionId) return;
