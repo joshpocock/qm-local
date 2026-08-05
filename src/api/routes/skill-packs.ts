@@ -3,6 +3,7 @@ import type { ApiCtx, Route } from "./route.ts";
 import { audit, authorizeAdmin, orgScope } from "./shared.ts";
 import type { NewSkillPack, SkillPack } from "../../skills/skill-pack-store.ts";
 import type { PackConfig } from "../../skills/normalize.ts";
+import { normalizeRepoUrl } from "../../skills/pack-fetcher.ts";
 import { parseScopeId, type ScopeId } from "../../types.ts";
 
 function asSubset(v: unknown): "all" | string[] | undefined {
@@ -68,10 +69,13 @@ async function registerPack(ctx: ApiCtx): Promise<void> {
   const subset = asSubset(b.subset);
   if (subset === undefined)
     return sendJson(ctx.res, 400, { error: "bad_request", message: "subset must be 'all' or string[]" });
+  // People paste the URL from their browser, which points at a branch page rather than the
+  // repository. Normalize it, and let the branch it carried stand in when no ref was given.
+  const normalized = normalizeRepoUrl(b.url);
   const input: NewSkillPack = {
     kind: "git",
-    url: b.url.trim(),
-    ref: typeof b.ref === "string" ? b.ref.trim() : "",
+    url: normalized.url,
+    ref: (typeof b.ref === "string" && b.ref.trim()) || normalized.ref || "",
 
     syncMode: "pinned",
     trustTier: b.trustTier === "internal" ? "internal" : "third-party",
@@ -148,7 +152,13 @@ async function patchPack(ctx: ApiCtx): Promise<void> {
   const b = (ctx.body ?? {}) as Record<string, unknown>;
   const patch: Partial<Omit<SkillPack, "id" | "createdAt">> = {};
   if (typeof b.ref === "string" && b.ref.trim()) patch.ref = b.ref.trim();
-  if (typeof b.url === "string" && b.url.trim()) patch.url = b.url.trim();
+  if (typeof b.url === "string" && b.url.trim()) {
+    // Same browsing-URL normalization as registration, so editing a pack cannot reintroduce
+    // a /tree/<branch> URL that git cannot clone.
+    const normalized = normalizeRepoUrl(b.url);
+    patch.url = normalized.url;
+    if (!patch.ref && normalized.ref) patch.ref = normalized.ref;
+  }
   if (b.trustTier === "internal" || b.trustTier === "third-party") patch.trustTier = b.trustTier;
   if (b.syncMode === "pinned" || b.syncMode === "tracked") patch.syncMode = b.syncMode;
   if (b.subset !== undefined) {

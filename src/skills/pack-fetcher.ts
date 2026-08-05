@@ -55,6 +55,36 @@ function normalizedHost(repoUrl: string): string | null {
   }
 }
 
+/**
+ * Turns the URL a person actually copies — the one in their browser's address bar — into
+ * something `git clone` accepts. `https://host/owner/repo/tree/main/packs/foo` is a web page,
+ * not a repository, and cloning it fails with a bare "not found"; the branch and subpath in it
+ * are real information, so they are handed back rather than dropped.
+ *
+ * Recognises the `/tree/<ref>/…` and `/blob/<ref>/…` layout used by GitHub, GitLab and Gitea.
+ * Anything else (an ssh remote, a bare repo URL, a self-hosted path that does not match) is
+ * returned untouched — this only ever removes a browsing prefix it is sure about.
+ */
+export function normalizeRepoUrl(raw: string): { url: string; ref?: string; subdir?: string } {
+  const trimmed = raw.trim();
+  if (!/^https?:\/\//i.test(trimmed)) return { url: trimmed };
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return { url: trimmed };
+  }
+  const segments = parsed.pathname.split("/").filter(Boolean);
+  const at = segments.findIndex((s) => s === "tree" || s === "blob");
+  // Need at least owner/repo before it, and a ref after it.
+  if (at < 2 || at + 1 >= segments.length) return { url: trimmed.replace(/\/+$/, "").replace(/\.git$/, "") + "" };
+  const repoPath = segments.slice(0, at).join("/");
+  const ref = segments[at + 1]!;
+  const subdir = segments.slice(at + 2).join("/");
+  const url = `${parsed.origin}/${repoPath}`;
+  return { url, ref, ...(subdir ? { subdir } : {}) };
+}
+
 function connectorHostFor(repoUrl: string): string | null {
   const host = normalizedHost(repoUrl);
   if (!host) return null;
