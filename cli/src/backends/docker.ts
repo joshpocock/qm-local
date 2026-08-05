@@ -430,7 +430,7 @@ function runArgs(ctx: DockerCtx, service: ServiceName, image: string): { args: s
     // `claude setup-token`. Opt out with QM_NO_HOST_CLAUDE_AUTH=1.
     const hostClaude = hostClaudeCredentialsPath();
     if (hostClaude && env.HARNESS === "claude") {
-      args.push("-v", `${hostClaude}:/run/qm/claude-credentials.json:ro`);
+      args.push("-v", `${hostMountPath(hostClaude)}:/run/qm/claude-credentials.json:ro`);
       args.push("-e", "CLAUDE_CREDENTIALS_FILE=/run/qm/claude-credentials.json");
       note(`claude auth: reusing your local login (${hostClaude})`);
     }
@@ -495,8 +495,20 @@ function statSockGid(): number | undefined {
   }
 }
 
+/**
+ * qm-local: a Windows host path (`C:\Users\me\x`) is not reliably accepted in a
+ * `-v host:container` argument, where the backslashes and the drive colon are
+ * ambiguous. Docker Desktop accepts forward slashes on every platform, so
+ * normalize there and leave POSIX paths untouched.
+ */
+function hostMountPath(path: string): string {
+  return process.platform === "win32" ? path.replace(/\\/g, "/") : path;
+}
+
 function skillMounts(ctx: DockerCtx): string[] {
-  return ctx.config.skills.map((s, i) => `${resolve(ctx.configDir, s)}:/app/plugins/deployment-skills-${i}/skills:ro`);
+  return ctx.config.skills.map(
+    (s, i) => `${hostMountPath(resolve(ctx.configDir, s))}:/app/plugins/deployment-skills-${i}/skills:ro`,
+  );
 }
 
 function existingLayerSubdirs(ctx: DockerCtx): Array<"skills" | "tools"> {
@@ -504,7 +516,7 @@ function existingLayerSubdirs(ctx: DockerCtx): Array<"skills" | "tools"> {
 }
 
 function layerMounts(ctx: DockerCtx): string[] {
-  return existingLayerSubdirs(ctx).map((sub) => `${join(ctx.sandboxDir, sub)}:/layer/${sub}:ro`);
+  return existingLayerSubdirs(ctx).map((sub) => `${hostMountPath(join(ctx.sandboxDir, sub))}:/layer/${sub}:ro`);
 }
 
 function noteLogTail(name: string, logs: string): void {
