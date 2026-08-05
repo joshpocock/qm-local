@@ -70,11 +70,19 @@ export function canAddToRoster(_personaIds: readonly string[], agent: AgentItem)
 // ---------------------------------------------------------------------------
 
 const personaCache = new Map<string, PersonaChip>();
+/**
+ * The whole persona, kept alongside the chip. A chip only ever needs four fields, but a
+ * mention popover has to show harness, model, scope, enabled state and instructions — and
+ * it is opened by a click, far too late to start a fetch. Same `/api/agents` payload, so
+ * this costs nothing beyond the reference.
+ */
+const agentCache = new Map<string, AgentItem>();
 
 /** Caches colour/glyph from the `/api/agents` list so transcript rows can be labelled. */
 export function cachePersonas(agents: readonly AgentItem[]): void {
   for (const agent of agents) {
     personaCache.set(agent.id, { id: agent.id, name: agent.name, color: agent.color, glyph: agent.glyph });
+    agentCache.set(agent.id, agent);
   }
 }
 
@@ -82,8 +90,14 @@ export function cachedPersona(id: string): PersonaChip | undefined {
   return personaCache.get(id);
 }
 
+/** The full persona behind a chip, when `/api/agents` has been read. */
+export function cachedAgent(id: string): AgentItem | undefined {
+  return agentCache.get(id);
+}
+
 export function clearPersonaCache(): void {
   personaCache.clear();
+  agentCache.clear();
 }
 
 /**
@@ -240,5 +254,5 @@ export function resetRoomState(): void {
   pendingRoomNames.clear();
   appliedRooms.clear();
   roomRefusals.clear();
-  personaCache.clear();
+  clearPersonaCache();
 }

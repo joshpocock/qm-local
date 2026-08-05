@@ -37,6 +37,38 @@ export interface ThreadableMessage {
 }
 
 /**
+ * The exact persona reply core treats as "I have nothing to add" (`PANEL_PASS` in
+ * `src/agents/panel-driver.ts`). Trimmed and case-sensitive, matching core's `isPanelPass`.
+ * Core no longer persists one, but rooms that predate that fix still carry them.
+ */
+export const ROOM_PASS_REPLY = "PASS";
+
+/**
+ * Drops the stored `PASS` replies from a room transcript, so they render as nothing at all
+ * rather than as an empty bubble — and, because the grouping and the reply counts are both
+ * built from the array this returns, so they never show up as an answer nobody gave.
+ *
+ * Three deliberate limits:
+ *
+ * - **Only in a room.** Outside one, `PASS` is just a word someone said.
+ * - **Only assistant turns.** A human is entitled to type PASS and see it.
+ * - **Never the live partial.** `keep` exists for the streaming message: a reply that has
+ *   only emitted `PASS` so far may still be mid-sentence, and blinking it out of the
+ *   transcript and back in would be worse than showing it for a moment.
+ */
+export function dropRoomPassReplies<T extends ThreadableMessage>(
+  messages: readonly T[],
+  opts: { isRoom: boolean; textOf: (message: T) => string; keep?: (message: T) => boolean },
+): T[] {
+  if (!opts.isRoom) return [...messages];
+  return messages.filter((message) => {
+    if (message.role !== "assistant") return true;
+    if (opts.keep?.(message)) return true;
+    return opts.textOf(message).trim() !== ROOM_PASS_REPLY;
+  });
+}
+
+/**
  * One row of the rendered transcript. `replies` is empty for every row that is not a
  * thread parent — including a user message nobody answered, which must render with no
  * thread affordance at all.

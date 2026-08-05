@@ -104,14 +104,17 @@ import {
   type RoomConfig,
 } from "./room-state";
 import {
+  dropRoomPassReplies,
   groupRoomTranscript,
   threadKeyFor,
   UNSENT_THREAD_KEY,
   type ThreadableMessage,
   type TranscriptRow,
 } from "./thread-group";
+import { installMentionChips, syncMentionTargets } from "./mention-markdown";
 
 installMarkdownSanitizer();
+installMentionChips();
 
 const detachedAgents = new WeakSet<Agent>();
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -942,7 +945,12 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
             glanceTier
               ? paneGlance(agent, messages, glanceTier)
               : html`<section class="chat-scroll" @scroll=${onTranscriptScroll}>
-                  <div class="message-stack ${messages.length ? "" : "empty-stack"}">
+                  <!-- data-mention-thread (MENTION_THREAD_ATTR) names the thread a chip
+                       resolves its roster from; lit needs the attribute name inline. -->
+                  <div
+                    class="message-stack ${messages.length ? "" : "empty-stack"}"
+                    data-mention-thread=${chatState.threadRef ?? ""}
+                  >
                     ${chatState.earlierCount > 0 ? earlierNotice(agent) : nothing} ${messageContent}
                     ${showStateError(messages, agent.state.errorMessage) ? html`<div class="composer-error inline">${agent.state.errorMessage}</div>` : nothing}
                   </div>
@@ -956,6 +964,9 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
       chatState.host,
     );
     decorateStreamingTail();
+    // Repaints mention chips when the roster changed value under a stack already on screen —
+    // the persona cache warms after the first draw, and a settled row does not re-render.
+    syncMentionTargets(chatState.host);
     ctx.composer.resizeComposer();
     scrollTranscript(opts.forceScroll);
     postCurrentPaneState();
@@ -1071,10 +1082,21 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     `;
   }
 
+  /**
+   * The transcript as drawn. Everything downstream — the flat rows, the thread grouping, the
+   * "N replies" counts — is built from this array, so dropping a message here drops it
+   * everywhere at once. The only thing dropped is a room's stored `PASS` replies (see
+   * `dropRoomPassReplies`); outside a room this is exactly the array it always was.
+   */
   function visibleMessages(agent: Agent): AgentMessage[] {
     const out = [...agent.state.messages];
-    if (agent.state.streamingMessage) out.push(agent.state.streamingMessage);
-    return out;
+    const streaming = agent.state.streamingMessage;
+    if (streaming) out.push(streaming);
+    return dropRoomPassReplies(out as Array<AgentMessage & ThreadableMessage>, {
+      isRoom: isRoomThread(chatState.threadRef),
+      textOf: (message) => messageText(message),
+      keep: (message) => message === streaming,
+    });
   }
 
   /** Everything the affordance under a human turn draws itself from. */
@@ -1339,7 +1361,7 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
                 type="button"
                 title="Fork conversation from here"
                 aria-label="Fork conversation from here"
-                @click=${() => void forkFromMessage(index)}
+                @click=${() => void forkFromMessage(message)}
               >
                 ${icon(GitFork, 13)}
               </button>`
@@ -1349,15 +1371,22 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     `;
   }
 
-  async function forkFromMessage(index: number): Promise<void> {
+  /**
+   * Takes the message rather than its row position: the transcript can be a filtered view of
+   * `agent.state.messages` (a room hides its stored `PASS` replies), so a row index is not an
+   * index into the array the cut is computed over. The identity is, and it is unambiguous —
+   * every row is drawn from an element of that same array.
+   */
+  async function forkFromMessage(target: AgentMessage): Promise<void> {
     const agent = chatState.agent;
     const sessionId = chatState.sessionId;
     const sourceThreadRef = chatState.threadRef;
     if (!agent || !sessionId) return;
     const messages = agent.state.messages as Array<{ role?: string }>;
-    const target = messages[index];
-    if (!target) return;
-    const isUser = target.role === "user" || target.role === "user-with-attachments";
+    const index = agent.state.messages.indexOf(target);
+    if (index < 0) return;
+    const targetRole = (target as { role?: string }).role;
+    const isUser = targetRole === "user" || targetRole === "user-with-attachments";
     let userOrdinal = 0;
     for (let i = 0; i <= index; i++) {
       const role = messages[i]?.role;

@@ -7066,6 +7066,106 @@ h3.ambient-field-label {
   margin-bottom: 5px;
 }
 
+/*
+ * An `@Name` inside a message body. Same parts as every other persona label, shrunk and
+ * baselined so it sits in a sentence rather than interrupting one: no wrapping inside the
+ * chip, and vertical-align keeps it on the text's own line box.
+ */
+.mention-chip.inline-mention {
+  padding: 0 6px 0 2px;
+  gap: 4px;
+  vertical-align: baseline;
+  font-size: 0.92em;
+  line-height: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.mention-chip.inline-mention .persona-dot {
+  width: 14px;
+  height: 14px;
+  font-size: 8px;
+}
+.mention-chip.inline-mention .persona-name {
+  font-weight: 600;
+}
+.mention-chip.inline-mention:hover,
+.mention-chip.inline-mention:focus-visible {
+  background: color-mix(in srgb, var(--persona-color, var(--secondary)) 16%, var(--background));
+}
+/* The viewer carries no persona colour, so it reads as a plain neutral highlight. */
+.mention-chip.mention-viewer {
+  border-color: var(--border);
+  background: var(--secondary);
+}
+.mention-chip.mention-viewer .persona-name {
+  color: var(--foreground);
+}
+
+.mention-popover-host {
+  position: relative;
+}
+/* Positioned against the chip in script; the card itself is the shell's standard menu. */
+.mention-popover {
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: auto;
+  width: 268px;
+  max-height: min(360px, 60vh);
+}
+.mention-card-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 2px 8px 6px;
+}
+.mention-card-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+.mention-card-meta {
+  margin: 0;
+  padding: 0 8px;
+  font-size: 11.5px;
+}
+.mention-card-meta > div {
+  display: flex;
+  gap: 8px;
+  padding: 2px 0;
+}
+.mention-card-meta dt {
+  min-width: 56px;
+  color: var(--muted-foreground);
+}
+.mention-card-meta dd {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mention-card-note,
+.mention-card-instructions {
+  margin: 6px 0 0;
+  padding: 0 8px;
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.mention-card-link {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 7px 8px 4px;
+  border-top: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+  text-decoration: none;
+}
+.mention-card-link:hover {
+  color: var(--foreground);
+}
+
 .room-roster {
   display: flex;
   align-items: center;

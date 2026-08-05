@@ -2077,8 +2077,11 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                 ...(input.displayText?.trim() ? { display: input.displayText } : {}),
               }
             : undefined;
+        // A room carries its own name — the one its creator typed, or its roster. Auto-titling
+        // it from the conversation is how a room ended up called "PASS".
+        const autoTitleAllowed = !session.room;
         const earlyTitleGen: Promise<string | undefined> | undefined =
-          humanTurn && !session.title && !syntheticPrompt && input.text.trim()
+          autoTitleAllowed && humanTurn && !session.title && !syntheticPrompt && input.text.trim()
             ? generateAndStoreTitle(session.id, scopeId, `User:\n${stripTurnBoilerplate(input.text)}`)
             : undefined;
         const requestedTurnWallClockMs =
@@ -2781,7 +2784,13 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                 }
               }
             }
-            if (!pausing && turnCompleted && !session.title && !(earlyTitleGen && (await earlyTitleGen))) {
+            if (
+              !pausing &&
+              turnCompleted &&
+              autoTitleAllowed &&
+              !session.title &&
+              !(earlyTitleGen && (await earlyTitleGen))
+            ) {
               await generateAndStoreTitle(session.id, scopeId, `User:\n${input.text}\n\nAssistant:\n${result.reply}`);
             }
           } finally {

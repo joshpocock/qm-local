@@ -922,15 +922,19 @@ function sessionMenuPopover(s: CoreSession): TemplateResult {
       <button class="session-menu-option" type="button" role="menuitem" @click=${() => startRename(s)}>
         ${icon(Pencil, 15)}<span>Rename</span>
       </button>
-      <button
-        class="session-menu-option"
-        type="button"
-        role="menuitem"
-        ?disabled=${refreshingTitle}
-        @click=${() => void refreshSessionTitle(s)}
-      >
-        ${icon(RefreshCw, 15)}<span>${refreshingTitle ? "Refreshing title" : "Refresh title"}</span>
-      </button>
+      ${
+        autoTitleable(s)
+          ? html`<button
+              class="session-menu-option"
+              type="button"
+              role="menuitem"
+              ?disabled=${refreshingTitle}
+              @click=${() => void refreshSessionTitle(s)}
+            >
+              ${icon(RefreshCw, 15)}<span>${refreshingTitle ? "Refreshing title" : "Refresh title"}</span>
+            </button>`
+          : nothing
+      }
       <button class="session-menu-option" type="button" role="menuitem" @click=${() => setArchived(s, !archived)}>
         ${archived ? icon(ArchiveRestore, 15) : icon(Archive, 15)}<span>${archived ? "Unarchive" : "Archive"}</span>
       </button>
@@ -1131,8 +1135,22 @@ function applyResolvedSession(updated: CoreSession): void {
   );
 }
 
+/**
+ * A room is never retitled from what was said in it. The room *is* its name — the operator
+ * picked it (or it derives from the roster), and a title generated off the transcript is how
+ * a room ends up called "PASS". Rename stays available; only the derive-it-for-me path is
+ * withheld, and the button that offers it is hidden for the same reason.
+ */
+function autoTitleable(s: CoreSession): boolean {
+  return !s.room;
+}
+
 async function refreshSessionTitle(s: CoreSession): Promise<void> {
   sessionsState.openMenuId = null;
+  if (!autoTitleable(s)) {
+    renderList();
+    return;
+  }
   if (refreshingTitleIds.has(s.id)) {
     renderList();
     return;
