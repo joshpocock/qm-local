@@ -39,7 +39,8 @@ import {
   renderDetectPrompt,
 } from "./pi-harness.ts";
 import { coreToolOptions, createPiTools, type PiToolsOptions, type ToolContextRef } from "./pi-tools.ts";
-import { reconstructMessagesFromHistory, seedPriorTurns, type PiReplayMessage } from "./replay.ts";
+import { assistantLineLabel, reconstructMessagesFromHistory, seedPriorTurns, type PiReplayMessage } from "./replay.ts";
+import type { FoldPersona } from "./tape-fold.ts";
 
 export interface ClaudeHarnessOptions {
   modelId?: string | ((scope?: ScopeId) => string | undefined);
@@ -272,7 +273,7 @@ function toolText(result: Awaited<ReturnType<BridgedTool["execute"]>>): string {
     .join("\n");
 }
 
-export function claudeReplayTranscript(messages: readonly PiReplayMessage[]): string {
+export function claudeReplayTranscript(messages: readonly PiReplayMessage[], viewer?: FoldPersona): string {
   if (!messages.length) return "";
   const lines: string[] = [];
   for (const message of messages) {
@@ -286,9 +287,10 @@ export function claudeReplayTranscript(messages: readonly PiReplayMessage[]): st
       );
       continue;
     }
+    const label = assistantLineLabel(message.authorName, viewer);
     for (const part of message.content) {
-      if (part.type === "text") lines.push(`Assistant: ${part.text}`);
-      else lines.push(`Assistant tool call (${part.name}, call ${part.id}): ${JSON.stringify(part.arguments)}`);
+      if (part.type === "text") lines.push(`${label}: ${part.text}`);
+      else lines.push(`${label} tool call (${part.name}, call ${part.id}): ${JSON.stringify(part.arguments)}`);
     }
   }
   return [
@@ -301,7 +303,7 @@ export function claudeReplayTranscript(messages: readonly PiReplayMessage[]): st
 }
 
 function promptText(turn: HarnessTurnInput): string {
-  const replay = claudeReplayTranscript(reconstructMessagesFromHistory(turn.history));
+  const replay = claudeReplayTranscript(reconstructMessagesFromHistory(turn.history), turn.persona);
   const prior = turn.history.length
     ? ""
     : seedPriorTurns(turn.priorTurns ?? [])

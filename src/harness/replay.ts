@@ -1,6 +1,7 @@
 import type { ConversationTurn, OverheardMessage, ScopeId, SessionEntry } from "../types.ts";
 import { contextSummaryPayload, forModelContext, INTERRUPTED_TOOL_RESULT } from "./context-compaction.ts";
 import { isoFromTs, messageTag } from "../util/message-tag.ts";
+import type { FoldPersona } from "./tape-fold.ts";
 
 export { INTERRUPTED_TOOL_RESULT };
 
@@ -97,6 +98,11 @@ export type PiReplayMessage =
       timestamp: number;
       stopReason: "stop";
       usage: PiZeroUsage;
+      /**
+       * Room attribution: the persona name stamped on the assistant session entry
+       * (`payload.persona.name`). Absent outside rooms and for pre-room entries.
+       */
+      authorName?: string;
     }
   | {
       role: "toolResult";
@@ -122,6 +128,27 @@ function entryText(e: SessionEntry): string {
   return String((e.payload as { text?: string } | null)?.text ?? "").trim();
 }
 
+/** Persona name stamped on an assistant-side entry payload by the harness adapters (D4). */
+function entryAuthorName(e: SessionEntry): string | undefined {
+  const p = (e.payload as { persona?: { name?: unknown } } | null)?.persona;
+  const name = typeof p?.name === "string" ? p.name.trim() : "";
+  return name || undefined;
+}
+
+/**
+ * The single label used for an assistant line in every entry-replay transcript.
+ *
+ * - no viewer (not a room turn): `"Assistant"`, whatever the author — byte-identical to pre-rooms.
+ * - viewer is the author: `"You (<name>)"`.
+ * - another author: `"<authorName>"`; unattributed authors fall back to `"Assistant"`.
+ */
+export function assistantLineLabel(authorName: string | undefined, viewer: FoldPersona | undefined): string {
+  if (!viewer) return "Assistant";
+  const name = authorName?.trim();
+  if (!name) return "Assistant";
+  return name === viewer.name ? `You (${name})` : name;
+}
+
 const hasToolCall = (m: PiReplayMessage): boolean =>
   m.role === "assistant" && m.content.some((c) => c.type === "toolCall");
 
@@ -138,12 +165,13 @@ export function reconstructMessagesFromHistory(history: readonly SessionEntry[])
     content: [{ type: "text", text }],
     timestamp: ts,
   });
-  const asstText = (text: string, ts: number): PiReplayMessage => ({
+  const asstText = (text: string, ts: number, authorName?: string): PiReplayMessage => ({
     role: "assistant",
     content: [{ type: "text", text }],
     timestamp: ts,
     stopReason: "stop",
     usage: zeroUsage(),
+    ...(authorName ? { authorName } : {}),
   });
 
   for (const e of history) {
@@ -162,10 +190,10 @@ export function reconstructMessagesFromHistory(history: readonly SessionEntry[])
       }
     } else if (e.type === "assistant") {
       const t = entryText(e);
-      if (t) raw.push(asstText(t, e.createdAt));
+      if (t) raw.push(asstText(t, e.createdAt, entryAuthorName(e)));
     } else if (e.type === "delivery") {
       const t = entryText(e);
-      if (t) raw.push(asstText(`(delivered file(s) to the conversation: ${t})`, e.createdAt));
+      if (t) raw.push(asstText(`(delivered file(s) to the conversation: ${t})`, e.createdAt, entryAuthorName(e)));
     } else if (e.type === "tool_call") {
       const p = (e.payload ?? {}) as Record<string, unknown>;
       const cid = typeof p.callId === "string" ? p.callId : "";
@@ -220,7 +248,16 @@ export function reconstructMessagesFromHistory(history: readonly SessionEntry[])
       prev.content.push(...m.content);
       continue;
     }
-    if (prev && prev.role === "assistant" && m.role === "assistant" && !hasToolCall(prev) && !hasToolCall(m)) {
+    if (
+      prev &&
+      prev.role === "assistant" &&
+      m.role === "assistant" &&
+      !hasToolCall(prev) &&
+      !hasToolCall(m) &&
+      // Never merge two personas' turns into one block — the attribution would be lost.
+      // Outside rooms both sides are `undefined`, so merging behaves exactly as before.
+      prev.authorName === m.authorName
+    ) {
       prev.content.push(...m.content);
       continue;
     }
@@ -287,7 +324,7 @@ export function planColdStartSeed(
   return "none";
 }
 
-export function replayPreamble(history: SessionEntry[]): string {
+export function replayPreamble(history: SessionEntry[], viewer?: FoldPersona): string {
   const textOf = (e: SessionEntry): string =>
     String((e.payload as { text?: string } | null)?.text ?? "")
       .trim()
@@ -305,9 +342,12 @@ export function replayPreamble(history: SessionEntry[]): string {
         );
       }
     } else if (e.type === "user" && textOf(e)) lines.push(`User: ${textOf(e)}`);
-    else if (e.type === "assistant" && textOf(e)) lines.push(`Assistant: ${textOf(e)}`);
+    else if (e.type === "assistant" && textOf(e))
+      lines.push(`${assistantLineLabel(entryAuthorName(e), viewer)}: ${textOf(e)}`);
     else if (e.type === "delivery" && textOf(e))
-      lines.push(`Assistant delivered file(s) to the conversation: ${textOf(e)}`);
+      lines.push(
+        `${assistantLineLabel(entryAuthorName(e), viewer)} delivered file(s) to the conversation: ${textOf(e)}`,
+      );
   }
   if (!lines.length) return "";
   return [

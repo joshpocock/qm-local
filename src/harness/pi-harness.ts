@@ -1232,6 +1232,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
     tapeMode?: "shadow" | "serve",
     tapeFold?: unknown[],
     tape?: HarnessTurnInput["tape"],
+    persona?: HarnessTurnInput["persona"],
   ): Promise<{ entry: TurnSession; compileMs: number; tapeWriteFailed: boolean }> {
     const compileStart = Date.now();
     const cacheBoundary =
@@ -1268,7 +1269,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
     }
     const seedSource = foldSeed ?? reconstructed;
     const seedPlan = planColdStartSeed(seedSource, !!priorTurns?.length);
-    const composedPrompt = systemPrompt + (seedPlan === "preamble" ? replayPreamble(history) : "");
+    const composedPrompt = systemPrompt + (seedPlan === "preamble" ? replayPreamble(history, persona) : "");
 
     const model = getRequiredModel(resolveModelId(turnScope));
     const modelRuntime = await buildModelRuntime(await resolveProviderKeys());
@@ -1447,6 +1448,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
           turn.tapeMode,
           turn.tapeFold,
           turn.tape,
+          turn.persona,
         );
         try {
           const turnWallClockMs = turn.turnWallClockMs ?? defaultTurnWallClockMs;

@@ -26,7 +26,8 @@ import { swallow } from "../util/errors.ts";
 import { countTokens } from "../util/tokens.ts";
 import { sanitizeTitle, TITLE_GENERATION_PROMPT } from "./pi-harness.ts";
 import { defineHarness, type Harness, type HarnessTurnInput, type HarnessTurnResult } from "./harness.ts";
-import { reconstructMessagesFromHistory, seedPriorTurns, type PiReplayMessage } from "./replay.ts";
+import { assistantLineLabel, reconstructMessagesFromHistory, seedPriorTurns, type PiReplayMessage } from "./replay.ts";
+import type { FoldPersona } from "./tape-fold.ts";
 
 export type AcpPermissionMode = "auto" | "deny";
 
@@ -123,7 +124,7 @@ export function acpProviderFailure(error: unknown): Error {
   return acpNonRetryable(error) ? new NonRetryableTurnError(message) : new Error(message);
 }
 
-export function acpReplayTranscript(messages: readonly PiReplayMessage[]): string {
+export function acpReplayTranscript(messages: readonly PiReplayMessage[], viewer?: FoldPersona): string {
   if (!messages.length) return "";
   const lines: string[] = [];
   for (const message of messages) {
@@ -137,9 +138,10 @@ export function acpReplayTranscript(messages: readonly PiReplayMessage[]): strin
       );
       continue;
     }
+    const label = assistantLineLabel(message.authorName, viewer);
     for (const part of message.content) {
-      if (part.type === "text") lines.push(`Assistant: ${part.text}`);
-      else lines.push(`Assistant tool call (${part.name}, call ${part.id}): ${JSON.stringify(part.arguments)}`);
+      if (part.type === "text") lines.push(`${label}: ${part.text}`);
+      else lines.push(`${label} tool call (${part.name}, call ${part.id}): ${JSON.stringify(part.arguments)}`);
     }
   }
   return [
@@ -152,7 +154,7 @@ export function acpReplayTranscript(messages: readonly PiReplayMessage[]): strin
 }
 
 export function acpTurnInputText(turn: HarnessTurnInput): string {
-  const replay = acpReplayTranscript(reconstructMessagesFromHistory(turn.history));
+  const replay = acpReplayTranscript(reconstructMessagesFromHistory(turn.history), turn.persona);
   const prior = turn.history.length
     ? ""
     : seedPriorTurns(turn.priorTurns ?? [])

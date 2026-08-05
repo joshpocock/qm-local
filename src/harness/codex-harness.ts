@@ -16,7 +16,8 @@ import { parseSecurityScreenVerdict, SECURITY_SCREEN_SYSTEM_PROMPT } from "../se
 import { CodexAppServer, CodexRpcError } from "./codex-app-server.ts";
 import { defineHarness, type Harness, type HarnessTurnInput, type HarnessTurnResult } from "./harness.ts";
 import { coreToolOptions, createPiTools, type PiToolsOptions, type ToolContextRef } from "./pi-tools.ts";
-import { reconstructMessagesFromHistory, seedPriorTurns, type PiReplayMessage } from "./replay.ts";
+import { assistantLineLabel, reconstructMessagesFromHistory, seedPriorTurns, type PiReplayMessage } from "./replay.ts";
+import type { FoldPersona } from "./tape-fold.ts";
 
 export interface CodexHarnessOptions {
   modelId?: string | ((scope?: ScopeId) => string | undefined);
@@ -298,8 +299,10 @@ export function codexReplayCallId(id: string): string {
   return id.length <= 64 ? id : createHash("sha256").update(id).digest("hex");
 }
 
-function replayItems(messages: readonly PiReplayMessage[]): CodexItem[] {
+function replayItems(messages: readonly PiReplayMessage[], viewer?: FoldPersona): CodexItem[] {
   const out: CodexItem[] = [];
+  // Call ids belonging to other personas' turns: their results must be elided with them.
+  const droppedCallIds = new Set<string>();
   for (const message of messages) {
     if (message.role === "user") {
       out.push({
@@ -310,6 +313,7 @@ function replayItems(messages: readonly PiReplayMessage[]): CodexItem[] {
       continue;
     }
     if (message.role === "toolResult") {
+      if (droppedCallIds.has(message.toolCallId)) continue;
       out.push({
         type: "function_call_output",
         call_id: codexReplayCallId(message.toolCallId),
@@ -317,11 +321,34 @@ function replayItems(messages: readonly PiReplayMessage[]): CodexItem[] {
       });
       continue;
     }
+    // In a room, another persona's turn (or unattributed pre-room history) must never replay as
+    // this model's own output: present it as an incoming user message and elide its tool calls,
+    // mirroring foldTapeForPersona. Outside rooms (`viewer` unset) items are emitted exactly as
+    // before.
+    if (viewer && message.authorName !== viewer.name) {
+      const author = message.authorName ?? "Assistant";
+      const texts: string[] = [];
+      let usedTools = false;
+      for (const part of message.content) {
+        if (part.type === "text") texts.push(part.text);
+        else if (part.type === "toolCall") {
+          usedTools = true;
+          droppedCallIds.add(part.id);
+        }
+      }
+      const line = `[${author}]: ${texts.join("\n")}` + (usedTools ? `\n[${author} used tools]` : "");
+      out.push({ type: "message", role: "user", content: [{ type: "input_text", text: line }] });
+      continue;
+    }
     const text = message.content
       .filter((part) => part.type === "text")
       .map((part) => part.text)
       .join("");
-    if (text) out.push({ type: "message", role: "assistant", content: [{ type: "output_text", text }] });
+    if (text) {
+      // Own prior turns keep the assistant role; in a room they are additionally self-labelled.
+      const labelled = viewer ? `${assistantLineLabel(message.authorName, viewer)}: ${text}` : text;
+      out.push({ type: "message", role: "assistant", content: [{ type: "output_text", text: labelled }] });
+    }
     for (const part of message.content) {
       if (part.type === "toolCall")
         out.push({
@@ -684,7 +711,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
       throw error;
     }
     const threadId = started.thread.id;
-    const replay = replayItems(reconstructMessagesFromHistory(turn.history));
+    const replay = replayItems(reconstructMessagesFromHistory(turn.history), turn.persona);
     let userEntry: SessionEntry;
     try {
       if (replay.length) await awaitSetup(rt.server.request("thread/inject_items", { threadId, items: replay }));
