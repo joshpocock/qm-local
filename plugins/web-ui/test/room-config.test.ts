@@ -340,7 +340,7 @@ const composer = readFileSync(new URL("../src/composer.ts", import.meta.url), "u
 test("the settled-row cache key includes the author, or a room's labels go stale", () => {
   assert.match(chat, /const persona = personaRowKey\(msg\.persona\);/);
   assert.ok(chat.includes("hit.persona === persona"), "the cache must compare the author identity");
-  assert.match(chat, /persona,\s*tpl,\s*\}\);/, "and store it alongside the memoised template");
+  assert.match(chat, /persona,\s*thread: threadKey,\s*tpl,\s*\}\);/, "and store it alongside the memoised template");
 });
 
 test("the author chip renders in the assistant branch only, above the bubble", () => {
@@ -479,12 +479,12 @@ test("rooms are lifted into their own sidebar section before chats are grouped",
 test("a room row shows its roster as glyphs, reusing the chip renderer", () => {
   assert.match(sessions, /\$\{roomRosterDots\(s\.room\)\}/);
   assert.match(sessions, /\$\{room \? "room-row" : ""\}/);
-  assert.match(roomsSrc, /function personaDot\(chip: PersonaChip\): TemplateResult/, "one dot renderer, three callers");
-  for (const caller of ["personaAuthorChip", "roomRosterChips", "roomRosterDots"]) {
+  assert.match(roomsSrc, /function personaDot\(chip: PersonaChip\): TemplateResult/, "one dot renderer, four callers");
+  for (const caller of ["personaAuthorChip", "roomRosterChips", "personaDotStack", "roomRosterDots"]) {
     const at = roomsSrc.indexOf(`export function ${caller}`);
     const body = roomsSrc.slice(at, roomsSrc.indexOf("\n}\n", at));
     assert.ok(
-      /personaDot\(|personaChip\(/.test(body),
+      /personaDot\(|personaDotStack\(|personaChip\(/.test(body),
       `${caller} must go through the shared renderers, not hand-roll the glyph markup`,
     );
   }

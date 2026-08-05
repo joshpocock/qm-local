@@ -84,21 +84,29 @@ export function roomRosterChips(room: RoomConfig | null): TemplateResult | typeo
 }
 
 /**
- * The same roster, shrunk to glyphs only, for a sidebar row where there is no width for
- * names. The names ride along in the tooltip so the row is still readable to a screen
- * reader and on hover.
+ * A set of personas shrunk to an overlapping stack of glyphs, for somewhere there is no
+ * width for names — a sidebar row, a collapsed thread's "who answered". The names ride
+ * along in the tooltip so it is still readable to a screen reader and on hover.
  */
-export function roomRosterDots(room: RoomConfig | null | undefined): TemplateResult | typeof nothing {
-  if (!room?.personaIds.length) return nothing;
-  const chips = rosterChips(room);
+export function personaDotStack(
+  chips: readonly PersonaChip[],
+  ariaLabel: (names: string) => string,
+): TemplateResult | typeof nothing {
+  if (!chips.length) return nothing;
   const label = chips.map((chip) => chip.name).join(", ");
   const shown = chips.slice(0, ROSTER_DOTS_SHOWN);
   const extra = chips.length - shown.length;
-  return html`<span class="room-dots" title=${label} aria-label=${`Agents in this room: ${label}`}
+  return html`<span class="room-dots" title=${label} aria-label=${ariaLabel(label)}
     >${shown.map((chip) => personaDot(chip))}${
       extra > 0 ? html`<span class="room-dots-more">+${extra}</span>` : nothing
     }</span
   >`;
+}
+
+/** The room's roster, as that stack, for a sidebar row. */
+export function roomRosterDots(room: RoomConfig | null | undefined): TemplateResult | typeof nothing {
+  if (!room?.personaIds.length) return nothing;
+  return personaDotStack(rosterChips(room), (names) => `Agents in this room: ${names}`);
 }
 
 // ---------------------------------------------------------------------------

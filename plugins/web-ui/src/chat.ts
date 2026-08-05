@@ -93,8 +93,23 @@ import {
 import { backgroundLabel, clearWorking, conversationBackground, markWorking } from "./session-list";
 import { liveTurnThreadRef } from "./working-dot";
 import { newChatDraftKey, saveDraft, storedDraft } from "./drafts";
-import { applyPendingRoom, ensureRoomPersonas, personaAuthorChip, roomRosterChips } from "./rooms";
-import { defaultRoomNameFor, isRoomThread, personaRowKey, roomFor, type RoomConfig } from "./room-state";
+import { applyPendingRoom, ensureRoomPersonas, personaAuthorChip, personaDotStack, roomRosterChips } from "./rooms";
+import {
+  defaultRoomNameFor,
+  isRoomThread,
+  personaChipFor,
+  personaRowKey,
+  roomFor,
+  type PersonaChip,
+  type RoomConfig,
+} from "./room-state";
+import {
+  groupRoomTranscript,
+  threadKeyFor,
+  UNSENT_THREAD_KEY,
+  type ThreadableMessage,
+  type TranscriptRow,
+} from "./thread-group";
 
 installMarkdownSanitizer();
 
@@ -116,6 +131,13 @@ interface SettledRowKey {
    * in the key a settled row would keep whatever label it had when it was memoised.
    */
   persona: string;
+  /**
+   * The thread affordance this row carries, flattened the same way: reply count, who
+   * replied, when the last one landed, and whether it is expanded. A human turn in a room
+   * is a settled message whose *rendered* row keeps changing as its agents answer, so
+   * without this in the key it would freeze at "1 reply" for the rest of the turn.
+   */
+  thread: string;
   tpl: TemplateResult | typeof nothing;
 }
 const settledRowCache = new WeakMap<object, SettledRowKey>();
@@ -158,6 +180,21 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
   let workTicker: ReturnType<typeof setInterval> | null = null;
   let revealedTailLen = 0;
   let liveWorkExpanded = false;
+  /**
+   * Threads the human has explicitly opened or closed, keyed by the parent turn's seq (see
+   * `threadKeyFor`). A seq survives the transcript being rebuilt from entries when a turn
+   * settles, which message identity does not, so a thread the person opened stays open
+   * across that refresh. Per-conversation: cleared on mount.
+   */
+  const threadToggles = new Map<number, boolean>();
+  /**
+   * Whether a turn has been taken in this conversation since it was mounted. It is what
+   * makes the newest thread open by default while its agents answer — and stay open once
+   * they are done — while a room opened cold reads as a tidy list of collapsed turns.
+   */
+  let threadsSeenLive = false;
+  /** Whether the last draw had a reply in flight, so a new one can start expanded. */
+  let liveThreadDrawn = false;
 
   function notePendingSessionOnSend(): void {
     if (!chatState.threadRef || chatState.sessionId !== null) return;
@@ -189,6 +226,13 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     chatState.transcriptAnchorSeq = null;
     chatState.earlierCount = 0;
     chatState.loadingEarlier = false;
+    resetThreadFolds();
+  }
+
+  function resetThreadFolds(): void {
+    threadToggles.clear();
+    threadsSeenLive = false;
+    liveThreadDrawn = false;
   }
 
   function resetChatState(): void {
@@ -257,6 +301,7 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     chatState.transcriptAnchorSeq = null;
     chatState.earlierCount = 0;
     chatState.loadingEarlier = false;
+    resetThreadFolds();
     chatState.host = document.createElement("div");
     chatState.host.className = "custom-chat";
 
@@ -870,9 +915,7 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     const isNewUser = sessionsState.list.filter((s) => s.id).length === 0;
     let messageContent: Array<TemplateResult | typeof nothing> | TemplateResult | typeof nothing = nothing;
     if (messages.length) {
-      messageContent = messages.map((m, i) =>
-        settledChatMessage(m, i, agent.state.isStreaming && m === agent.state.streamingMessage),
-      );
+      messageContent = transcriptRows(agent, messages);
     } else if (isNewUser) {
       messageContent = welcomeGreeting();
     }
@@ -1034,23 +1077,160 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     return out;
   }
 
+  /** Everything the affordance under a human turn draws itself from. */
+  interface ThreadSummary {
+    /** Fold-state identity — the parent's seq, or the sentinel for a turn not yet saved. */
+    key: number;
+    count: number;
+    open: boolean;
+    /** When the newest reply landed. Absent only if no reply carried a timestamp. */
+    lastAt?: number;
+    /** Who replied, first-spoke order, deduped — a persona taking three turns shows once. */
+    chips: PersonaChip[];
+  }
+
+  /**
+   * The transcript, threaded when the conversation is a room: each human turn renders as
+   * the parent, with its agents' replies folded underneath it.
+   *
+   * Outside a room — and for any reply whose parent is not on screen — `groupRoomTranscript`
+   * hands back one row per message and this is exactly the flat `.map` it replaced.
+   */
+  function transcriptRows(agent: Agent, messages: AgentMessage[]): Array<TemplateResult | typeof nothing> {
+    const streaming = agent.state.isStreaming ? agent.state.streamingMessage : null;
+    const liveIndex = streaming ? messages.indexOf(streaming) : -1;
+    const rows = groupRoomTranscript(messages as unknown as readonly ThreadableMessage[], {
+      isRoom: isRoomThread(chatState.threadRef),
+      liveIndex: liveIndex >= 0 ? liveIndex : null,
+    });
+    const live = rows.some((row) => row.live);
+    if (live) {
+      threadsSeenLive = true;
+      // A brand-new turn starts expanded even if the person collapsed the previous one
+      // while it was still running: both are keyed by the same not-yet-saved sentinel.
+      if (!liveThreadDrawn) threadToggles.delete(UNSENT_THREAD_KEY);
+    }
+    liveThreadDrawn = live;
+    const newest = rows.findLast((row) => row.replies.length) ?? null;
+
+    const out: Array<TemplateResult | typeof nothing> = [];
+    for (const row of rows) {
+      const message = messages[row.index]!;
+      if (!row.replies.length) {
+        out.push(settledChatMessage(message, row.index, message === streaming));
+        continue;
+      }
+      const thread = threadSummary(messages, row, row === newest);
+      out.push(settledChatMessage(message, row.index, message === streaming, thread));
+      if (!thread.open) continue;
+      out.push(
+        html`<div
+          class="thread-replies"
+          id=${threadPanelId(thread.key)}
+          role="group"
+          aria-label=${replyCountLabel(thread.count)}
+        >
+          ${row.replies.map((i) => settledChatMessage(messages[i]!, i, messages[i] === streaming))}
+        </div>`,
+      );
+    }
+    return out;
+  }
+
+  function replyCountLabel(count: number): string {
+    return `${count} ${count === 1 ? "reply" : "replies"}`;
+  }
+
+  function threadPanelId(key: number): string {
+    return `thread-replies-${key === UNSENT_THREAD_KEY ? "live" : key}`;
+  }
+
+  /**
+   * Collapsed by default, because a settled room is far easier to read as a list of turns
+   * than as one long run. Two things open a thread: the person clicking it, and it being
+   * the newest thread of a conversation that has taken a turn since it was mounted — which
+   * is the one they just sent into, and which stays open once its agents are done.
+   */
+  function threadSummary(messages: AgentMessage[], row: TranscriptRow, newest: boolean): ThreadSummary {
+    const key = threadKeyFor(messages[row.index] as ThreadableMessage);
+    const chips: PersonaChip[] = [];
+    const seen = new Set<string>();
+    let lastAt: number | undefined;
+    for (const i of row.replies) {
+      const reply = messages[i] as AssistantWork & { timestamp?: number };
+      const chip = personaChipFor(reply.persona);
+      if (chip && !seen.has(chip.id)) {
+        seen.add(chip.id);
+        chips.push(chip);
+      }
+      if (typeof reply.timestamp === "number") lastAt = reply.timestamp;
+    }
+    return {
+      key,
+      count: row.replies.length,
+      open: threadToggles.get(key) ?? (newest && threadsSeenLive),
+      lastAt,
+      chips,
+    };
+  }
+
+  /**
+   * The "3 replies" bar under a human turn: who answered, how often, and when the last one
+   * landed. It is the only way into a collapsed thread, so it is a real button — keyboard
+   * reachable, naming the panel it controls.
+   */
+  function threadAffordance(thread: ThreadSummary): TemplateResult {
+    return html`<button
+      class="thread-toggle ${thread.open ? "open" : ""}"
+      type="button"
+      aria-expanded=${thread.open ? "true" : "false"}
+      aria-controls=${threadPanelId(thread.key)}
+      title=${thread.open ? "Hide replies" : "Show replies"}
+      @click=${() => {
+        threadToggles.set(thread.key, !thread.open);
+        drawActiveChat();
+      }}
+    >
+      ${personaDotStack(thread.chips, (names) => `Replies from ${names}`)}
+      <span class="thread-count">${replyCountLabel(thread.count)}</span>
+      ${thread.lastAt !== undefined ? html`<span class="thread-last">${formatClock(thread.lastAt)}</span>` : nothing}
+      <span class="thread-chevron">${icon(ChevronRight, 13)}</span>
+    </button>`;
+  }
+
+  /** Cache-invalidation identity for the affordance a memoised row carries (see SettledRowKey). */
+  function threadRowKey(thread: ThreadSummary | undefined): string {
+    if (!thread) return "";
+    // Joined on a character none of the parts can contain, so the key is unambiguous.
+    return [
+      thread.key,
+      thread.count,
+      thread.open ? "open" : "shut",
+      thread.lastAt ?? "",
+      thread.chips.map((chip) => `${chip.id}:${chip.glyph ?? ""}:${chip.color ?? ""}`).join(","),
+    ].join("\n");
+  }
+
   function settledChatMessage(
     message: AgentMessage,
     index: number,
     isStreaming: boolean,
+    thread?: ThreadSummary,
   ): TemplateResult | typeof nothing {
     const msg = message as AssistantWork & { stopReason?: string; errorMessage?: string; approvalDecision?: string };
     const work = msg.work;
     const cacheable =
       !isStreaming &&
       (!work || ((work.status === "complete" || work.status === "failed") && !work.pendingApprovals?.length));
-    if (!cacheable) return chatMessage(message, index, isStreaming);
+    if (!cacheable) return chatMessage(message, index, isStreaming, thread);
     const forkable = Boolean(chatState.threadRef && chatState.sessionId && chatState.agent);
     const persona = personaRowKey(msg.persona);
+    const threadKey = threadRowKey(thread);
     const hit = settledRowCache.get(message as object);
     if (
       hit &&
       hit.persona === persona &&
+      hit.thread === threadKey &&
       hit.index === index &&
       hit.activity === work?.activity &&
       hit.status === work?.status &&
@@ -1063,7 +1243,7 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     ) {
       return hit.tpl;
     }
-    const tpl = chatMessage(message, index, isStreaming);
+    const tpl = chatMessage(message, index, isStreaming, thread);
     settledRowCache.set(message as object, {
       index,
       activity: work?.activity,
@@ -1075,12 +1255,18 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
       approvalDecision: msg.approvalDecision,
       forkable,
       persona,
+      thread: threadKey,
       tpl,
     });
     return tpl;
   }
 
-  function chatMessage(message: AgentMessage, index: number, isStreaming = false): TemplateResult | typeof nothing {
+  function chatMessage(
+    message: AgentMessage,
+    index: number,
+    isStreaming = false,
+    thread?: ThreadSummary,
+  ): TemplateResult | typeof nothing {
     if ((message as { opener?: boolean }).opener) return nothing;
     const role = (message as { role?: string }).role;
     if (role === "user" || role === "user-with-attachments") {
@@ -1093,7 +1279,7 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
             ${markdown(messageText(message))}
             ${attachments.length ? html`<div class="message-files">${attachments.map(userAttachmentBadge)}</div>` : nothing}
           </div>
-          ${messageMeta(message, index)}
+          ${thread ? threadAffordance(thread) : nothing} ${messageMeta(message, index)}
         </article>
       `;
     }

@@ -280,6 +280,13 @@ export type AssistantWork = AssistantMessage & {
   deliveredFiles?: DeliveredFile[];
   /** Set in rooms: which persona spoke this turn, threaded from `entry.payload.persona`. */
   persona?: MessagePersona;
+  /** Seq of the entry this reply was built from. Absent on a client-side partial. */
+  seq?: number;
+  /**
+   * `entry.parentSeq`, carried through so the transcript can thread a room. Outside rooms
+   * this is the ordinary linear `seq - 1` chain and means nothing — see `thread-group.ts`.
+   */
+  parentSeq?: number | null;
 };
 
 export interface RunPoll {
@@ -1123,6 +1130,8 @@ interface HistoryUserMessage {
   timestamp?: number;
   attachments?: HistoryAttachment[];
   steered?: boolean;
+  /** Seq of the entry this turn was built from — what a room's replies point back at. */
+  seq?: number;
 }
 
 function postCallText(payload: unknown): string | null {
@@ -1178,7 +1187,13 @@ export function entriesToMessages(entries: SessionEntry[], model: Model<Api>): A
     }
     deliveryFiles.push(...files);
   };
-  const flushWork = (text: string, at?: number, closed = false, persona?: MessagePersona): void => {
+  const flushWork = (
+    text: string,
+    at?: number,
+    closed = false,
+    persona?: MessagePersona,
+    link?: { seq?: number; parentSeq?: number | null },
+  ): void => {
     if (!text && !pending.length && !deliveryFiles.length) return;
     const deliveredSilence = (a: ToolActivity): boolean => {
       if (a.type !== "tool_result") return false;
@@ -1214,6 +1229,8 @@ export function entriesToMessages(entries: SessionEntry[], model: Model<Api>): A
       };
     if (deliveryFiles.length) msg.deliveredFiles = deliveryFiles;
     if (persona) msg.persona = persona;
+    if (typeof link?.seq === "number") msg.seq = link.seq;
+    if (typeof link?.parentSeq === "number") msg.parentSeq = link.parentSeq;
     out.push(msg as AgentMessage);
     pending = [];
     deliveryFiles = [];
@@ -1274,6 +1291,7 @@ export function entriesToMessages(entries: SessionEntry[], model: Model<Api>): A
           content: userText,
           timestamp: e.createdAt,
           ...(payload?.steered ? { steered: true } : {}),
+          ...(typeof e.seq === "number" ? { seq: e.seq } : {}),
         };
         if (atts.length) {
           msg.attachments = atts.map((a, i) => ({
@@ -1299,9 +1317,9 @@ export function entriesToMessages(entries: SessionEntry[], model: Model<Api>): A
             payload: { text, demoted: true },
             createdAt: e.createdAt,
           });
-          flushWork("", e.createdAt, false, persona);
+          flushWork("", e.createdAt, false, persona, e);
         } else {
-          flushWork(text, e.createdAt, !posted, persona);
+          flushWork(text, e.createdAt, !posted, persona, e);
         }
       }
       posted = false;
