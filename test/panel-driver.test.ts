@@ -13,7 +13,7 @@ import { findRoute } from "../src/api/routes/route.ts";
 import { apiRoutes } from "../src/api/routes/index.ts";
 import { roomRoutes } from "../src/api/routes/rooms.ts";
 import { testConfig } from "./support/test-config.ts";
-import type { RoomConfig, SessionEntry, TurnRequest } from "../src/types.ts";
+import { ROOM_MAX_ROUNDS, type RoomConfig, type SessionEntry, type TurnRequest } from "../src/types.ts";
 import type { AgentPersona } from "../src/agents/persona-store.ts";
 import {
   PANEL_CONTINUATION_NUDGE,
@@ -22,6 +22,7 @@ import {
   isPanelPass,
   panelMembersFrom,
   panelMentions,
+  renderPanelSystemBlock,
   runPanel,
   type PanelMember,
   type PanelTurnSpec,
@@ -33,6 +34,23 @@ import {
 
 const ALICE: PanelMember = { id: "ap_a", name: "Alfa", harnessId: "mock", modelId: "claude-opus-4-8" };
 const BRAVO: PanelMember = { id: "ap_b", name: "Bravo", harnessId: "mock", modelId: "claude-sonnet-5" };
+const CHARLIE: PanelMember = { id: "ap_c", name: "Charlie", harnessId: "mock", modelId: "claude-sonnet-5" };
+
+const fakePersona = (over: Partial<AgentPersona> = {}): AgentPersona => ({
+  id: "ap_x",
+  scopeId: "personal:U1",
+  name: "X",
+  color: "#ba9926",
+  glyph: "X",
+  harnessId: "mock",
+  modelId: "claude-opus-4-8",
+  instructions: "",
+  enabled: true,
+  createdBy: "U1",
+  createdAt: 1,
+  version: 1,
+  ...over,
+});
 
 function scripted(replies: Record<string, string | string[]>) {
   const taken: PanelTurnSpec[] = [];
@@ -128,6 +146,107 @@ test("a reply of exactly PASS grants nothing", async () => {
   assert.deepEqual(panelMentions(PANEL_PASS, ["Alfa", "Bravo"], "Alfa"), []);
 });
 
+test("a round in which every agent PASSes ends the panel; the next round never runs", async () => {
+  const s = scripted({ Alfa: PANEL_PASS, Bravo: PANEL_PASS });
+  await runPanel({ members: [ALICE, BRAVO], rounds: 3, text: "go", state: { abort: false }, run: s.run });
+
+  assert.deepEqual(
+    s.taken.map((t) => `${t.persona.name}@${t.round}`),
+    ["Alfa@1", "Bravo@1"],
+    "a settled room stops after the round it settled in",
+  );
+});
+
+test("a round with one PASS and one substantive reply continues to the next round", async () => {
+  const s = scripted({ Alfa: PANEL_PASS, Bravo: "there is still the pricing table" });
+  await runPanel({ members: [ALICE, BRAVO], rounds: 2, text: "go", state: { abort: false }, run: s.run });
+
+  assert.deepEqual(
+    s.taken.map((t) => `${t.persona.name}@${t.round}`),
+    ["Alfa@1", "Bravo@1", "Alfa@2", "Bravo@2"],
+    "one voice still talking keeps the room open",
+  );
+});
+
+test("a mention-granted bonus turn counts as a turn of its round, and a later all-PASS round still ends the panel", async () => {
+  // Round 1: Alfa invites Bravo, so Bravo takes a bonus turn — a round with a substantive
+  // reply in it, which by construction can never be all-PASS. Round 2: both PASS, and the
+  // panel ends there even though round 1 carried an extra turn (the tally resets per round).
+  const s = scripted({
+    Alfa: ["@Bravo does that match what you saw?", PANEL_PASS, "should never be reached"],
+    Bravo: [PANEL_PASS, PANEL_PASS, PANEL_PASS],
+  });
+  await runPanel({ members: [ALICE, BRAVO], rounds: 4, text: "go", state: { abort: false }, run: s.run });
+
+  assert.deepEqual(
+    s.taken.map((t) => `${t.persona.name}@${t.round}`),
+    ["Alfa@1", "Bravo@1", "Bravo@1", "Alfa@2", "Bravo@2"],
+    "round 1 had a bonus turn and a substantive reply so it continued; round 2 was all-PASS and ended the panel",
+  );
+});
+
+test("an all-PASS round ends the panel for an agent that only ever spoke on an invitation", async () => {
+  // Charlie is invited by Alfa in round 1; in round 2 nobody has anything left, including the
+  // agents that only spoke because they were mentioned.
+  const s = scripted({
+    Alfa: ["@Charlie your read?", PANEL_PASS],
+    Bravo: [PANEL_PASS, PANEL_PASS],
+    Charlie: [PANEL_PASS, PANEL_PASS, PANEL_PASS],
+  });
+  await runPanel({
+    members: [ALICE, BRAVO, CHARLIE],
+    rounds: 5,
+    text: "go",
+    state: { abort: false },
+    run: s.run,
+  });
+
+  assert.deepEqual(
+    s.taken.map((t) => `${t.persona.name}@${t.round}`),
+    ["Alfa@1", "Bravo@1", "Charlie@1", "Charlie@1", "Alfa@2", "Bravo@2", "Charlie@2"],
+  );
+});
+
+test("a room with rounds: 7 runs all seven rounds while the agents keep talking", async () => {
+  const s = scripted({ Alfa: "still thinking out loud", Bravo: "and here is another angle" });
+  await runPanel({ members: [ALICE, BRAVO], rounds: 7, text: "go", state: { abort: false }, run: s.run });
+
+  assert.equal(s.taken.length, 14, "two agents x seven rounds, no bonus turns, no early exit");
+  assert.deepEqual([...new Set(s.taken.map((t) => t.round))], [1, 2, 3, 4, 5, 6, 7]);
+  assert.deepEqual(
+    s.taken.map((t) => t.rounds),
+    Array.from({ length: 14 }, () => 7),
+    "every turn carries the panel's full budget",
+  );
+});
+
+test("renderPanelSystemBlock states the round position, and says so plainly on the last round", () => {
+  const speaker = fakePersona({ id: "ap_1", name: "Scout", glyph: "SC", instructions: "You are Scout." });
+  const roster = [speaker, fakePersona({ id: "ap_2", name: "Critic", glyph: "CR" })];
+
+  const mid = renderPanelSystemBlock(speaker, roster, { round: 2, rounds: 5 });
+  assert.match(mid, /This is round 2 of 5\./);
+  assert.doesNotMatch(mid, /final round/);
+
+  const last = renderPanelSystemBlock(speaker, roster, { round: 5, rounds: 5 });
+  assert.equal(
+    last.endsWith("This is round 5 of 5 — the final round. State your conclusion; do not defer it to a later turn."),
+    true,
+    last,
+  );
+
+  const none = renderPanelSystemBlock(speaker, roster);
+  assert.doesNotMatch(none, /round/i, "no round line at all when the driver did not supply one");
+  assert.equal(renderPanelSystemBlock(speaker, roster, {}), none, "an empty opts object is the same as none");
+  assert.equal(renderPanelSystemBlock(speaker, roster, { round: 2 }), none, "a half-known position says nothing");
+  assert.equal(renderPanelSystemBlock(speaker, roster, { rounds: 5 }), none);
+  assert.equal(
+    mid.slice(0, none.length),
+    none,
+    "the round line is appended; every other word of the block is unchanged",
+  );
+});
+
 test("mention matching is case-insensitive and respects name boundaries", () => {
   const roster = ["Alfa", "Bravo"];
   assert.deepEqual(panelMentions("hey @bravo", roster, "Alfa"), ["Bravo"]);
@@ -155,21 +274,7 @@ test("the abort flag stops the queue between persona turns", async () => {
 });
 
 test("panelMembersFrom drops disabled, archived, and missing agents and never caps the roster", () => {
-  const persona = (over: Partial<AgentPersona>): AgentPersona => ({
-    id: "ap_x",
-    scopeId: "personal:U1",
-    name: "X",
-    color: "#ba9926",
-    glyph: "X",
-    harnessId: "mock",
-    modelId: "claude-opus-4-8",
-    instructions: "",
-    enabled: true,
-    createdBy: "U1",
-    createdAt: 1,
-    version: 1,
-    ...over,
-  });
+  const persona = fakePersona;
   const members = panelMembersFrom([
     persona({ id: "ap_1", name: "One" }),
     persona({ id: "ap_2", name: "Two", enabled: false }),
@@ -272,6 +377,31 @@ test("a human message into a two-agent room runs exactly two persona turns, attr
   assert.equal(nudges.length, 0, "the continuation nudge never lands in the transcript as a user message");
 });
 
+test("a two-round room tells each persona turn where in the panel it is", async () => {
+  const built = freshApp();
+  const threadRef = "web:U1:room-rounds";
+  const { session } = await openRoom(built, threadRef, (ids) => ({ personaIds: ids, rounds: 2 }), ["Scout", "Critic"]);
+
+  const before = await built.runs.list();
+  const result = await built.app.turn(webTurn(threadRef, "two rounds on this, please"));
+  assert.notEqual(result.status, "refused", result.reason);
+
+  const seen = new Set(before.map((r) => r.id));
+  const panelRuns = (await built.runs.list())
+    .filter((r) => !seen.has(r.id) && r.sessionId === threadRef && r.request.panel)
+    .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+
+  assert.deepEqual(
+    panelRuns.map((r) => `${r.request.panel!.persona.name}@${r.request.panel!.round}/${r.request.panel!.rounds}`),
+    ["Scout@1/2", "Critic@1/2", "Scout@2/2", "Critic@2/2"],
+    "every persona turn carries its round position and the panel's budget",
+  );
+  assert.equal(
+    (await built.sessions.getEntries(session.id)).filter((e) => e.type === "assistant" && personaOf(e)).length,
+    4,
+  );
+});
+
 test("a room whose agents are all disabled falls back to a single ordinary turn", async () => {
   const built = freshApp();
   const threadRef = "web:U1:room-2";
@@ -354,11 +484,21 @@ test("PUT /v1/sessions/:id/room validates the roster and round-trips through the
       ["too many agents", { personaIds: [scout.id, critic.id, scout.id, critic.id, scout.id], rounds: 1 }],
       ["no agents", { personaIds: [], rounds: 1 }],
       ["duplicate agents", { personaIds: [scout.id, scout.id], rounds: 1 }],
-      ["out-of-range rounds", { personaIds: [scout.id], rounds: 4 }],
+      ["zero rounds", { personaIds: [scout.id], rounds: 0 }],
+      ["fractional rounds", { personaIds: [scout.id], rounds: 3.5 }],
+      ["negative rounds", { personaIds: [scout.id], rounds: -1 }],
+      ["over the ceiling", { personaIds: [scout.id], rounds: ROOM_MAX_ROUNDS + 1 }],
       ["unknown agent", { personaIds: ["ap_nope"], rounds: 1 }],
       ["disabled agent", { personaIds: [dormant.id], rounds: 1 }],
     ] as const) {
       assert.equal((await put(room)).status, 400, label);
+    }
+
+    assert.equal(ROOM_MAX_ROUNDS, 20, "the documented ceiling");
+    for (const rounds of [1, ROOM_MAX_ROUNDS]) {
+      const accepted = await put({ personaIds: [scout.id], rounds });
+      assert.equal(accepted.status, 200, `rounds: ${rounds} is in range`);
+      assert.equal((await built.sessions.get(session.id))!.room!.rounds, rounds, "and it round-trips");
     }
 
     assert.equal((await put(null)).status, 200);
@@ -433,12 +573,26 @@ test("an invalid request-borne room is refused, not silently degraded", async ()
   assert.equal(unknown.status, "refused");
   assert.match(unknown.reason ?? "", /unknown agent/);
 
-  const badRounds = await built.app.turn({
-    ...webTurn("web:U1:room-bad-2", "hi"),
-    room: { personaIds: [scout.id], rounds: 9 },
+  let seq = 0;
+  for (const rounds of [0, 3.5, -1, ROOM_MAX_ROUNDS + 1]) {
+    const badRounds = await built.app.turn({
+      ...webTurn(`web:U1:room-bad-2-${(seq += 1)}`, "hi"),
+      room: { personaIds: [scout.id], rounds },
+    });
+    assert.equal(badRounds.status, "refused", `rounds: ${rounds}`);
+    assert.match(badRounds.reason ?? "", /room\.rounds must be 1-20/);
+  }
+
+  const wide = await built.app.turn({
+    ...webTurn("web:U1:room-wide", "hi"),
+    room: { personaIds: [scout.id], rounds: ROOM_MAX_ROUNDS },
   });
-  assert.equal(badRounds.status, "refused");
-  assert.match(badRounds.reason ?? "", /rounds/);
+  assert.notEqual(wide.status, "refused", wide.reason);
+  assert.equal(
+    (await built.sessions.getByThread("web:U1:room-wide"))!.room!.rounds,
+    ROOM_MAX_ROUNDS,
+    "the ceiling itself is a legal room",
+  );
 
   assert.equal(
     await built.sessions.getByThread("web:U1:room-bad-1"),

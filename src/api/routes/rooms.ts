@@ -57,7 +57,7 @@ async function putSessionRoom(ctx: ApiCtx): Promise<void> {
       if (!persona.enabled)
         return sendJson(res, 400, { error: "bad_request", message: `agent ${persona.name} is disabled` });
     }
-    room = { personaIds: personaIds as string[], rounds: rounds as RoomConfig["rounds"] };
+    room = { personaIds: personaIds as string[], rounds };
   }
 
   const session = await app.updateSessionRoom(ctx.params.id!, principalId, room);

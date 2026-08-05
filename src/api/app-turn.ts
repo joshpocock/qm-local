@@ -1,4 +1,11 @@
-import type { Conversation, Principal, RoomConfig, TurnRequest, TurnResult } from "../types.ts";
+import {
+  ROOM_MAX_ROUNDS,
+  type Conversation,
+  type Principal,
+  type RoomConfig,
+  type TurnRequest,
+  type TurnResult,
+} from "../types.ts";
 import { agentRoomsEnabled, orgId as orgIdOf } from "../config.ts";
 import { panelMembersFrom, runPanel, type PanelState, type PanelTurnSpec } from "../agents/panel-driver.ts";
 import { scopeId } from "../types.ts";
@@ -79,8 +86,8 @@ export function createTurnMethods(deps: AppDeps, h: AppHelpers, ambient: Ambient
       return { error: "room.personaIds must be one or more unique agent ids" };
     }
     const rounds = raw.rounds;
-    if (typeof rounds !== "number" || !Number.isInteger(rounds) || rounds < 1 || rounds > 3) {
-      return { error: "room.rounds must be 1-3" };
+    if (typeof rounds !== "number" || !Number.isInteger(rounds) || rounds < 1 || rounds > ROOM_MAX_ROUNDS) {
+      return { error: `room.rounds must be 1-${ROOM_MAX_ROUNDS}` };
     }
     const visible = new Map((await visiblePersonasFor(deps, h, principalId)).map((p) => [p.id, p] as const));
     for (const id of personaIds) {
@@ -88,7 +95,7 @@ export function createTurnMethods(deps: AppDeps, h: AppHelpers, ambient: Ambient
       if (!persona) return { error: `unknown agent: ${id}` };
       if (!persona.enabled) return { error: `agent ${persona.name} is disabled` };
     }
-    return { room: { personaIds, rounds: rounds as RoomConfig["rounds"] } };
+    return { room: { personaIds, rounds } };
   }
 
   /**
@@ -138,7 +145,13 @@ export function createTurnMethods(deps: AppDeps, h: AppHelpers, ambient: Ambient
       const next: TurnRequest = {
         ...req,
         text: spec.text,
-        panel: { persona: spec.persona, continuation: spec.continuation, rosterIds },
+        panel: {
+          persona: spec.persona,
+          continuation: spec.continuation,
+          rosterIds,
+          round: spec.round,
+          rounds: spec.rounds,
+        },
         harness: spec.harness,
         model: spec.model,
         async,

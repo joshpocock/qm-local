@@ -197,6 +197,7 @@ async function panelSystemBlock(
   threadRef: string,
   personaId: string,
   rosterIds?: readonly string[],
+  position?: { round?: number; rounds?: number },
 ): Promise<string> {
   const personas = deps.personas;
   if (!personas) return "";
@@ -212,7 +213,7 @@ async function panelSystemBlock(
     const roster = (await Promise.all(ids.map((id) => personas.get(id)))).filter(
       (p): p is AgentPersona => !!p && p.archivedAt === undefined,
     );
-    return `\n\n${renderPanelSystemBlock(speaker, roster)}`;
+    return `\n\n${renderPanelSystemBlock(speaker, roster, position)}`;
   } catch (e) {
     swallow("orchestrator: panel system block", e);
     return "";
@@ -833,7 +834,10 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       // A persona composes directly below the SOUL stack, under the same org-authoritative
       // framing, followed by the roster it is speaking to. Outside rooms this is empty.
       const panelBlock = input.panel
-        ? await panelSystemBlock(deps, conversation.threadRef, input.panel.persona.id, input.panel.rosterIds)
+        ? await panelSystemBlock(deps, conversation.threadRef, input.panel.persona.id, input.panel.rosterIds, {
+            ...(typeof input.panel.round === "number" ? { round: input.panel.round } : {}),
+            ...(typeof input.panel.rounds === "number" ? { rounds: input.panel.rounds } : {}),
+          })
         : "";
       let systemPrompt = `${modeFrame}\n\n${resolution.systemPrompt}${panelBlock}\n\n${sharedCore}\n\n${renderSecurityPolicyPrompt(securityPolicy)}`;
       const scopeProfile = supportsScopeProfile(deps.sandbox)

@@ -39,7 +39,9 @@ export interface PanelTurnSpec {
   text: string;
   /** 0-based position in the panel, across rounds */
   index: number;
+  /** 1-based round this turn belongs to, and the panel's total budget */
   round: number;
+  rounds: number;
 }
 
 export interface PanelRunOptions {
@@ -95,6 +97,11 @@ export async function runPanel(o: PanelRunOptions): Promise<void> {
   for (let round = 1; round <= o.rounds; round += 1) {
     const queue: PanelMember[] = [...o.members];
     const grantedThisRound = new Set<string>();
+    // A round where nobody had anything to add is a settled room: it ends the panel rather
+    // than grinding through the rounds that are left. Bonus (mention-granted) turns count as
+    // turns of the round they were granted in, and a turn that threw is not a PASS.
+    let turnsThisRound = 0;
+    let passesThisRound = 0;
     for (let i = 0; i < queue.length; i += 1) {
       if (o.state.abort || index >= ceiling) return;
       const member = queue[i]!;
@@ -106,6 +113,7 @@ export async function runPanel(o: PanelRunOptions): Promise<void> {
         text: index > 0 ? PANEL_CONTINUATION_NUDGE : o.text,
         index,
         round,
+        rounds: o.rounds,
       };
       let result: { reply?: string } | undefined;
       try {
@@ -117,11 +125,16 @@ export async function runPanel(o: PanelRunOptions): Promise<void> {
           `[panel] ${member.name} turn ${index} failed: ${err instanceof Error ? err.message : String(err)}`,
         );
         index += 1;
+        turnsThisRound += 1;
         continue;
       }
       index += 1;
+      turnsThisRound += 1;
       const reply = result?.reply;
-      if (isPanelPass(reply)) continue;
+      if (isPanelPass(reply)) {
+        passesThisRound += 1;
+        continue;
+      }
       for (const name of panelMentions(reply, roster, member.name)) {
         const invited = o.members.find((m) => m.name.toLowerCase() === name.toLowerCase());
         if (!invited || grantedThisRound.has(invited.id)) continue;
@@ -129,6 +142,7 @@ export async function runPanel(o: PanelRunOptions): Promise<void> {
         queue.push(invited);
       }
     }
+    if (turnsThisRound > 0 && passesThisRound === turnsThisRound) return;
   }
 }
 
@@ -136,7 +150,11 @@ export async function runPanel(o: PanelRunOptions): Promise<void> {
  * The persona block, composed below the org SOUL with the same wording lower-scope SOUL uses:
  * a persona may add to the organization policy, never override it.
  */
-export function renderPanelSystemBlock(speaker: AgentPersona, roster: readonly AgentPersona[]): string {
+export function renderPanelSystemBlock(
+  speaker: AgentPersona,
+  roster: readonly AgentPersona[],
+  opts?: { round?: number; rounds?: number },
+): string {
   const bio = (p: AgentPersona): string => {
     const first = p.instructions.split("\n").find((line) => line.trim()) ?? "";
     return first.trim() ? `${p.name} — ${first.trim()}` : p.name;
@@ -156,5 +174,16 @@ export function renderPanelSystemBlock(speaker: AgentPersona, roster: readonly A
         "; ",
       )}. Address another agent as @Name to invite their reply. If you have nothing to add, reply exactly ${PANEL_PASS}.`,
   );
+  // An agent that does not know its budget cannot pace itself, so it hedges and defers. When
+  // the driver knows the position, say it — and on the last round say so plainly.
+  const round = opts?.round;
+  const rounds = opts?.rounds;
+  if (typeof round === "number" && typeof rounds === "number") {
+    parts.push(
+      round >= rounds
+        ? `This is round ${round} of ${rounds} — the final round. State your conclusion; do not defer it to a later turn.`
+        : `This is round ${round} of ${rounds}.`,
+    );
+  }
   return parts.join("\n\n");
 }

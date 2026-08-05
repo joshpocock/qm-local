@@ -67,10 +67,12 @@ export type SessionType = "dm" | "channel" | "group";
 export interface RoomConfig {
   /** persona ids, in the order they speak; a room may hold as many as you like */
   personaIds: string[];
-  rounds: 1 | 2 | 3;
+  /** how many times the roster goes round; an integer in 1..ROOM_MAX_ROUNDS */
+  rounds: number;
 }
 
-export const ROOM_MAX_ROUNDS = 3;
+/** Upper bound on `RoomConfig.rounds`; valid values are the integers 1..ROOM_MAX_ROUNDS. */
+export const ROOM_MAX_ROUNDS = 20;
 
 export interface Session {
   id: string;
@@ -417,8 +419,16 @@ export interface TurnRequest {
    * wrote, so it reaches the harness but never lands in the transcript as a user entry.
    * `rosterIds` carries the panel's full membership so the roster block is right even on
    * the very first turn, before the session (and its stored room config) exists.
+   * `round`/`rounds` are the panel's budget, so the persona can pace itself toward a
+   * conclusion instead of deferring forever; both absent means "say nothing about rounds".
    */
-  panel?: { persona: { id: string; name: string }; continuation: boolean; rosterIds?: string[] };
+  panel?: {
+    persona: { id: string; name: string };
+    continuation: boolean;
+    rosterIds?: string[];
+    round?: number;
+    rounds?: number;
+  };
   /**
    * A room roster arriving with the message itself — used for the first message of a new
    * room, where there is no session yet for PUT /v1/sessions/:id/room to target. Validated

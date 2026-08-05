@@ -7,12 +7,13 @@ order, an @mention bonus turn, persona chips, one user entry, roster persisted.
 ## One-time setup
 
 1. `QM_AGENT_ROOMS=1` is set for core in `qm-win-test/qm.config.jsonc` (done).
-2. Both harness logins must be fresh:
-   - **Codex**: `~/.codex/auth.json` — working as of today.
-   - **Claude Code**: `~/.claude/.credentials.json` — **EXPIRED, needs you**:
-     run `claude login` once in a terminal (interactive OAuth; nothing I can do
-     autonomously). Until then claude-harness personas fail with an auth error
-     (which now shows as that persona's turn and the panel continues).
+2. Both harness logins must be fresh — verified working 2026-08-05:
+   - **Codex**: `~/.codex/auth.json`.
+   - **Claude Code**: `~/.claude/.credentials.json`. This expires (~8h) and the
+     container cannot refresh it; when a persona's turn returns "Failed to
+     authenticate: OAuth session expired", run `claude login` in a terminal and
+     `docker restart qm-winlocal-core`. The panel survives the failure and the
+     other agents still speak, so it degrades visibly rather than silently.
 3. Deploy: `node <qm-local>/cli/dist/bin/qm.js up --build-from=<qm-local>` from
    `qm-win-test`. (Currently the running core is hot-patched + image rebuilt,
    so a plain restart is also fine.)
