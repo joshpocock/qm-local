@@ -29,6 +29,7 @@ import type { ModelGateway } from "../model/model-gateway.ts";
 import type { ModelCredentialStore } from "../model/model-credential-store.ts";
 import type { AclStore } from "../acl/acl-store.ts";
 import type { SkillStore, Skill, SkillResolution } from "../skills/skill-store.ts";
+import type { AgentPersona, AgentPersonaPatch, AgentPersonaStore } from "../agents/persona-store.ts";
 import type { SkillPack, NewSkillPack, SkillPackStore } from "../skills/skill-pack-store.ts";
 import type { SkillPackFetcher } from "../skills/pack-fetcher.ts";
 import { type IngestPlan, type ImportResult } from "../skills/ingest.ts";
@@ -422,6 +423,22 @@ export interface App {
     id: string;
     liveActor?: boolean;
   }): Promise<"missing" | "forbidden" | "trigger_blocked" | "deleted">;
+  listVisiblePersonas(principalId: string): Promise<AgentPersona[]>;
+  getPersona(id: string): Promise<AgentPersona | null>;
+  canManagePersona(persona: AgentPersona, principalId: string): Promise<boolean>;
+  createPersona(input: {
+    principalId: string;
+    homeScope?: ScopeId;
+    name: string;
+    color: string;
+    glyph: string;
+    harnessId: string;
+    modelId: string;
+    instructions: string;
+    enabled?: boolean;
+  }): Promise<AgentPersona>;
+  updatePersona(id: string, principalId: string, patch: AgentPersonaPatch): Promise<AgentPersona | null>;
+  archivePersona(id: string, principalId: string): Promise<"missing" | "forbidden" | "archived">;
   rollbackDeployment(id: string, version: number): Promise<void>;
   archiveDeployment(id: string): Promise<void>;
   restoreDeployment(id: string, actorId?: string): Promise<Deployment>;
@@ -470,6 +487,7 @@ export interface AppDeps {
   acl: AclStore;
   admin?: AdminService;
   skills: SkillStore;
+  personas: AgentPersonaStore;
   skillPacks?: SkillPackStore;
   skillFetcher?: SkillPackFetcher;
   skillBundles?: SkillBundleStore;

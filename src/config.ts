@@ -142,6 +142,7 @@ export interface Config {
   sharedOwnerAuthIsolation: boolean;
   surfaceDebugFooter: boolean;
   eagerProvisionEnabled: boolean;
+  agentRooms: boolean;
   awsSandbox: AwsSandboxEnv;
   localSandbox: LocalSandboxEnv;
   spritesSandbox: SpritesSandboxEnv;
@@ -425,6 +426,15 @@ export function boolEnv(value: string | undefined): boolean | undefined {
   if (["1", "true", "yes", "on"].includes(v)) return true;
   if (["0", "false", "no", "off", "none"].includes(v)) return false;
   return undefined;
+}
+
+/**
+ * Agent rooms (multi-persona conversations) are off until an operator opts in with
+ * QM_AGENT_ROOMS=1. The route table reads this directly because it is built before
+ * any Config exists; loadConfig reuses it so both agree on what "on" means.
+ */
+export function agentRoomsEnabled(env?: NodeJS.ProcessEnv): boolean {
+  return boolEnv((env ?? process.env).QM_AGENT_ROOMS) === true;
 }
 
 export function numEnv(value: string | undefined): number | undefined {
@@ -902,6 +912,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     sharedOwnerAuthIsolation: boolEnvStrict("SHARED_OWNER_AUTH_ISOLATION", env.SHARED_OWNER_AUTH_ISOLATION) ?? false,
     surfaceDebugFooter: boolEnvStrict("SURFACE_DEBUG_FOOTER", env.SURFACE_DEBUG_FOOTER) ?? false,
     eagerProvisionEnabled: boolEnvStrict("EAGER_PROVISION", env.EAGER_PROVISION) ?? false,
+    agentRooms: agentRoomsEnabled(env),
     awsSandbox: awsSandboxEnv(env),
     localSandbox: localSandboxEnv(env),
     spritesSandbox: spritesSandboxEnv(env),

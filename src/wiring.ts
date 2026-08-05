@@ -27,6 +27,7 @@ import { createResolutionService } from "./resolution/resolution-service.ts";
 import { createAclStore, type AclStore } from "./acl/acl-store.ts";
 import { createPostgresGrantStore } from "./acl/postgres-grant-store.ts";
 import { createSkillStore, type SkillStore, type Skill } from "./skills/skill-store.ts";
+import { createAgentPersonaStore, type AgentPersona, type AgentPersonaStore } from "./agents/persona-store.ts";
 import { createSkillPackStore, type SkillPack } from "./skills/skill-pack-store.ts";
 import { createSkillBundleStore, type SkillBundle, type SkillBundleStore } from "./skills/skill-bundle-store.ts";
 import { createGitFetcher, resolvePackAuth, type SkillPackFetcher } from "./skills/pack-fetcher.ts";
@@ -321,6 +322,7 @@ export interface BuiltApp {
   modelCredentials: ModelCredentialStore;
   acl: AclStore;
   skills: SkillStore;
+  personas: AgentPersonaStore;
   skillBundles: SkillBundleStore;
   skillFetcher: SkillPackFetcher;
   auditLog: AuditLog;
@@ -440,6 +442,9 @@ export function buildApp(
   const skills: SkillStore = createSkillStore({
     backing: artifactMap<Skill>("skills"),
     ...(config.skillSigningSecret ? { signingSecret: config.skillSigningSecret } : {}),
+  });
+  const personas: AgentPersonaStore = createAgentPersonaStore({
+    backing: artifactMap<AgentPersona>("agent_personas"),
   });
   const skillPacks = createSkillPackStore({ backing: artifactMap<SkillPack>("skill_packs") });
   const skillBundles = createSkillBundleStore({ backing: artifactMap<SkillBundle>("skill_bundles") });
@@ -1055,6 +1060,7 @@ export function buildApp(
     acl,
     admin,
     skills,
+    personas,
     skillPacks,
     skillFetcher,
     skillBundles,
@@ -1387,6 +1393,7 @@ export function buildApp(
     modelCredentials,
     acl,
     skills,
+    personas,
     skillBundles,
     skillFetcher,
     auditLog,
