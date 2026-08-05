@@ -176,15 +176,26 @@ export function createTurnMethods(deps: AppDeps, h: AppHelpers, ambient: Ambient
           state.abort = true;
           return {};
         }
-        const driven = await drive(queued.runId);
-        await persistIfNeeded();
-        return driven;
+        try {
+          return await drive(queued.runId);
+        } finally {
+          await persistIfNeeded();
+        }
       }
-      const result = await methods.turn(personaRequest(spec, false));
+      let result: TurnResult;
+      try {
+        result = await methods.turn(personaRequest(spec, false));
+      } catch (err) {
+        // The turn may still have created the session (and written the persona's error entry)
+        // before crashing, so the roster is persisted either way: a failed first speaker must
+        // not cost the room its config.
+        if (spec.index === 0) await persistIfNeeded();
+        throw err;
+      }
       if (spec.index === 0) {
         resolveFirst(result);
         if (result.status === "refused" || result.status === "failed") state.abort = true;
-        else await persistIfNeeded();
+        await persistIfNeeded();
       }
       return result;
     };

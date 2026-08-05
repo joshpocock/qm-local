@@ -106,7 +106,18 @@ export async function runPanel(o: PanelRunOptions): Promise<void> {
         index,
         round,
       };
-      const result = await o.run(spec);
+      let result: { reply?: string } | undefined;
+      try {
+        result = await o.run(spec);
+      } catch (err) {
+        // One agent failing (auth, provider outage) must not silence the rest of the room:
+        // its error is already in the transcript as that persona's turn; the panel moves on.
+        console.error(
+          `[panel] ${member.name} turn ${index} failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        index += 1;
+        continue;
+      }
       index += 1;
       const reply = result?.reply;
       if (isPanelPass(reply)) continue;
