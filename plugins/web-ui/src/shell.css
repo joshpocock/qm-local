@@ -3141,6 +3141,132 @@ body.resizing-sidebar {
   justify-content: center;
   gap: 10px;
 }
+
+/* Import skills from a folder. The row list borrows .room-pick* wholesale — this block
+   only adds the parts a roster picker has no equivalent of: the folder input, the
+   per-row portability flag, and the run summary. */
+.skill-import-dialog {
+  width: min(560px, 100%);
+}
+.skill-import-file {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 22px 14px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-align: center;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+.skill-import-file:hover,
+.skill-import-file:focus-within {
+  border-color: color-mix(in srgb, var(--foreground) 45%, var(--border));
+  background: var(--secondary);
+}
+.skill-import-file input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+.skill-import-file-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.skill-import-file-hint {
+  max-width: 34ch;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.skill-import-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 16px;
+}
+.skill-import-count {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.skill-import-list {
+  margin-top: 8px;
+  max-height: 320px;
+}
+.skill-import-pick {
+  align-items: flex-start;
+  padding: 9px 10px;
+}
+.skill-import-pick .room-pick-box {
+  margin-top: 2px;
+}
+.skill-import-pick .room-pick-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: visible;
+  white-space: normal;
+}
+.skill-import-pick .room-pick-meta {
+  white-space: normal;
+}
+.skill-import-flag {
+  color: color-mix(in srgb, #b45309 80%, var(--foreground));
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.skill-import-flag.portable {
+  color: var(--muted-foreground);
+}
+.skill-import-note {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+.skill-import-scope {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+}
+.skill-import-scope > span {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 600;
+}
+.skill-import-progress {
+  margin: 18px 0 0;
+  font-size: 13px;
+}
+.skill-import-results {
+  margin: 10px 0 0;
+  padding: 0;
+  max-height: 200px;
+  overflow-y: auto;
+  list-style: none;
+}
+.skill-import-results li {
+  display: flex;
+  gap: 8px;
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.skill-import-results code {
+  flex: none;
+  color: var(--foreground);
+}
 @media (max-width: 620px) {
   .skill-registry-controls {
     align-items: stretch;
@@ -4178,6 +4304,7 @@ body.resizing-sidebar {
   }
   .pane-action,
   .list-page-action,
+  .skill-import-trigger,
   .pane .btn {
     min-height: 44px;
   }
@@ -5253,13 +5380,15 @@ body.resizing-sidebar {
   min-width: 0;
   flex-shrink: 0;
 }
-.list-page-action {
+.list-page-action,
+.skill-import-trigger {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   white-space: nowrap;
 }
-.list-page-action svg {
+.list-page-action svg,
+.skill-import-trigger svg {
   flex-shrink: 0;
 }
 @media (max-width: 620px) {
@@ -7129,4 +7258,16 @@ h3.ambient-field-label {
 }
 .composer-error.room-refusal > span {
   min-width: 0;
+}
+
+/* Custom round count, shown when the picker is set to "Custom…". */
+.room-rounds-input {
+  width: 72px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 13px;
 }

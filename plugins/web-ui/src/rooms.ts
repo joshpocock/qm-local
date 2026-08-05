@@ -15,6 +15,7 @@ import { fieldSelect, icon } from "./ui";
 import { AGENT_ROOMS_DISABLED_COPY, type AgentItem } from "./agent-registry";
 import {
   cachePersonas,
+  MAX_ROOM_ROUNDS,
   clearPendingRoom,
   DEFAULT_ROOM_ROUNDS,
   pendingRoomFor,
@@ -106,12 +107,15 @@ export function ensureRoomPersonas(): Promise<void> {
 // "New room" dialog
 // ---------------------------------------------------------------------------
 
+/** Sentinel option value: the picker switches to a free number input. */
+const CUSTOM_ROUNDS = "custom";
+
 interface RoomDialogState {
   open: boolean;
   loading: boolean;
   agents: AgentItem[];
   personaIds: string[];
-  rounds: 1 | 2 | 3;
+  rounds: number;
   error: string;
   roomsDisabled: boolean;
   onCreate: ((config: RoomConfig) => void) | null;
@@ -248,17 +252,42 @@ function roomDialogTpl(): TemplateResult {
           ${fieldSelect({
             compact: true,
             ariaLabel: "Rounds per message",
-            value: String(dialogState.rounds),
+            value: ROOM_ROUNDS.includes(dialogState.rounds) ? String(dialogState.rounds) : CUSTOM_ROUNDS,
             disabled: dialogState.roomsDisabled,
             onChange: (value) => {
-              dialogState.rounds = (Number(value) || DEFAULT_ROOM_ROUNDS) as 1 | 2 | 3;
+              dialogState.rounds = value === CUSTOM_ROUNDS ? ROOM_ROUNDS.length + 1 : Number(value);
               drawRoomDialog();
             },
-            options: ROOM_ROUNDS.map(
-              (rounds) => html`<option value=${String(rounds)}>${rounds} round${rounds === 1 ? "" : "s"}</option>`,
-            ),
+            options: [
+              ...ROOM_ROUNDS.map(
+                (rounds) => html`<option value=${String(rounds)}>${rounds} round${rounds === 1 ? "" : "s"}</option>`,
+              ),
+              html`<option value=${CUSTOM_ROUNDS}>Custom…</option>`,
+            ],
           })}
+          ${
+            ROOM_ROUNDS.includes(dialogState.rounds)
+              ? nothing
+              : html`<input
+                  class="room-rounds-input"
+                  type="number"
+                  min="1"
+                  max=${String(MAX_ROOM_ROUNDS)}
+                  step="1"
+                  aria-label="Number of rounds"
+                  .value=${String(dialogState.rounds)}
+                  ?disabled=${dialogState.roomsDisabled}
+                  @input=${(event: Event) => {
+                  dialogState.rounds = Number((event.target as HTMLInputElement).value);
+                  dialogState.error = "";
+                }}
+                />`
+          }
         </label>
+        <p class="room-hint">
+          A round is one turn each, in roster order. Agents are told which round they are on, and the room stops early
+          once nobody has anything left to add.
+        </p>
         <div class="form-error" aria-live="polite">${dialogState.error}</div>
         <div class="project-dialog-actions">
           <button class="btn" type="button" @click=${closeRoomDialog}>Cancel</button>

@@ -18,7 +18,7 @@ import type { AgentItem } from "./agent-registry";
 
 export interface RoomConfig {
   personaIds: string[];
-  rounds: 1 | 2 | 3;
+  rounds: number;
 }
 
 /** Identity core stamps onto assistant entries in a room (`payload.persona`). */
@@ -36,14 +36,18 @@ export interface PersonaChip {
 }
 
 export const MIN_ROOM_PERSONAS = 1;
-export const ROOM_ROUNDS: ReadonlyArray<1 | 2 | 3> = [1, 2, 3];
-export const DEFAULT_ROOM_ROUNDS: 1 | 2 | 3 = 1;
+/** Quick picks in the dialog; any integer up to MAX_ROOM_ROUNDS is accepted. */
+export const ROOM_ROUNDS: readonly number[] = [1, 2, 3];
+export const MAX_ROOM_ROUNDS = 20;
+export const DEFAULT_ROOM_ROUNDS = 1;
 
 export function roomConfigError(config: { personaIds: readonly string[]; rounds: number }): string | null {
   const unique = new Set(config.personaIds);
   if (unique.size !== config.personaIds.length) return "Each agent can only be in the room once.";
   if (config.personaIds.length < MIN_ROOM_PERSONAS) return "Pick at least one agent.";
-  if (!ROOM_ROUNDS.includes(config.rounds as 1 | 2 | 3)) return "Rounds must be 1, 2, or 3.";
+  if (!Number.isInteger(config.rounds) || config.rounds < 1 || config.rounds > MAX_ROOM_ROUNDS) {
+    return `Rounds must be a whole number from 1 to ${MAX_ROOM_ROUNDS}.`;
+  }
   return null;
 }
 

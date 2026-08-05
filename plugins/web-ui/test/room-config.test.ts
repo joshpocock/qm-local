@@ -57,7 +57,7 @@ function makeAgent(id: string, name: string, over: Partial<AgentItem> = {}): Age
 // Roster rules
 // ---------------------------------------------------------------------------
 
-test("a roster holds one or more unique agents over 1-3 rounds, with no size cap", () => {
+test("a roster holds one or more unique agents over 1-20 rounds, with no size cap", () => {
   assert.equal(roomConfigError({ personaIds: ["a"], rounds: 1 }), null);
   assert.equal(roomConfigError({ personaIds: ["a", "b", "c", "d"], rounds: 3 }), null);
   assert.equal(
@@ -67,8 +67,11 @@ test("a roster holds one or more unique agents over 1-3 rounds, with no size cap
   );
   assert.ok(roomConfigError({ personaIds: [], rounds: 1 }), "an empty roster is not a room");
   assert.ok(roomConfigError({ personaIds: ["a", "a"], rounds: 1 }), "an agent cannot be in a room twice");
+  assert.equal(roomConfigError({ personaIds: ["a"], rounds: 7 }), null, "a custom round count is allowed");
+  assert.equal(roomConfigError({ personaIds: ["a"], rounds: 20 }), null, "up to the ceiling");
   assert.ok(roomConfigError({ personaIds: ["a"], rounds: 0 }));
-  assert.ok(roomConfigError({ personaIds: ["a"], rounds: 4 }));
+  assert.ok(roomConfigError({ personaIds: ["a"], rounds: 21 }), "past the ceiling");
+  assert.ok(roomConfigError({ personaIds: ["a"], rounds: 2.5 }), "whole rounds only");
 });
 
 test("toggling roster membership preserves order and never refuses a pick", () => {
