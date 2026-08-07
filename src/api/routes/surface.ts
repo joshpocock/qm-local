@@ -1004,7 +1004,8 @@ async function getSurfaceConfig(ctx: ApiCtx): Promise<void> {
           // this the surfaces show the onboarding wall on a deployment that
           // answers turns perfectly well.
           modelProviderConfigured:
-            Object.values(managedKeys).some(Boolean) || harnessAuthenticatesItself(harnessId),
+            Object.values(managedKeys).some(Boolean) ||
+            (isHarnessId(harnessId) && harnessAuthenticatesItself(harnessId)),
         }
       : {}),
     externalSlackParticipants,
