@@ -21,3 +21,6 @@ __pycache__/
 docs/master.html
 
 .context/
+
+# Scratch dir for delegated-agent recon maps and build reports (frugal-fable)
+.frugal-fable/
