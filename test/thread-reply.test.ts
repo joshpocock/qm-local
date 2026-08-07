@@ -277,7 +277,7 @@ test("an @tag inside a reply still promotes the conversation to a room, threadin
   assert.equal(assistants.at(-1)!.parentSeq, user.seq);
 });
 
-test("with no replyToSeq the entries are exactly what they were before the field existed", async () => {
+test("with no replyToSeq an ordinary turn is linear end to end", async () => {
   const built = freshApp();
   const threadRef = "web:U1:reply-absent";
   const { session } = await openThread(built, threadRef);
@@ -289,8 +289,9 @@ test("with no replyToSeq the entries are exactly what they were before the field
   const user = ofType(added, "user")[0]!;
   assert.equal(user.parentSeq, user.seq - 1, "the human's message stays on the linear chain");
   assert.ok(ofType(added, "tool_call").length >= 1, "the turn did tool work worth checking");
-  for (const entry of added.filter((e) => e.type !== "assistant")) {
+  for (const entry of added) {
+    // Nothing threads: one agent answering one person is a conversation, not a thread of
+    // one. A thread is only shaped by a panel, or by a human replying into one.
     assert.equal(entry.parentSeq, entry.seq - 1, `${entry.type} keeps the linear parent`);
   }
-  assert.equal(ofType(added, "assistant").at(-1)!.parentSeq, user.seq, "and only the reply threads, as before");
 });

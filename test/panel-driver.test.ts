@@ -926,7 +926,7 @@ test("an @tagged single-agent message threads the same way", async () => {
   assert.equal(assistants[0]!.parentSeq, users[0]!.seq, "and its reply hangs off the human message");
 });
 
-test("a conversation with no room threads its reply under the message that triggered it", async () => {
+test("a conversation with no room stays linear — no thread of one", async () => {
   const built = freshApp();
   const threadRef = "web:U1:thread-plain";
 
@@ -943,12 +943,12 @@ test("a conversation with no room threads its reply under the message that trigg
   const assistants = ofType(added, "assistant");
   assert.ok(assistants.length >= 1, "the plain turn still replies");
   assert.ok(ofType(added, "tool_call").length >= 1, "and it used a tool on the way");
-  assert.equal(
-    assistants.at(-1)!.parentSeq,
-    user.seq,
-    "the reply hangs off the human message, in a 1:1 chat exactly as in a room",
-  );
-  assert.notEqual(assistants.at(-1)!.seq - 1, user.seq, "and that is not simply the linear parent");
+  // One agent answering one person is a conversation, not a thread: threading it would
+  // turn a plain chat into a column of collapsed "1 reply" rows. A thread is shaped by a
+  // panel, or by a human replying into one.
+  for (const entry of added) {
+    assert.equal(entry.parentSeq, entry.seq - 1, `${entry.type} keeps the linear parent`);
+  }
 });
 
 test("only the reply threads: thinking, tool_call and tool_result keep the linear chain", async () => {
@@ -975,10 +975,10 @@ test("only the reply threads: thinking, tool_call and tool_result keep the linea
   }
 });
 
-test("each turn threads under its own message; no reply is ever stapled to an earlier turn's", async () => {
+test("no reply is ever stapled to an earlier turn's message", async () => {
   // The guard against a turn with no message of its own (proactive, ambient) reaching back
-  // for an older `user` entry: outside a panel the parent can only ever be the entry THIS
-  // turn wrote, so a reply can never land on the previous turn's message.
+  // for an older `user` entry. Outside a panel nothing threads at all, so each turn's
+  // entries stay on their own linear run and a reply can never land on an earlier message.
   const built = freshApp();
   const threadRef = "web:U1:thread-plain-2";
   await built.app.turn(webTurn(threadRef, "hello"));
@@ -995,16 +995,14 @@ test("each turn threads under its own message; no reply is ever stapled to an ea
   const firstUser = ofType(first, "user")[0]!;
   const secondUser = ofType(second, "user")[0]!;
   assert.notEqual(firstUser.seq, secondUser.seq);
-  assert.equal(ofType(first, "assistant").at(-1)!.parentSeq, firstUser.seq);
-  assert.equal(
-    ofType(second, "assistant").at(-1)!.parentSeq,
-    secondUser.seq,
-    "the second reply threads under the second message, never under the first",
-  );
+  const secondReply = ofType(second, "assistant").at(-1)!;
+  assert.equal(secondReply.parentSeq, secondReply.seq - 1, "the second reply stays linear");
+  assert.ok(secondReply.parentSeq! > firstUser.seq, "and never reaches back to the first message");
 });
 
-test("with the flag off a reply still threads under the message that triggered it", async () => {
-  // Threading is not part of the agent-rooms feature: it is how every session behaves.
+test("with the flag off an ordinary reply is linear", async () => {
+  // Threading rides on panels and on explicit replies, so with rooms off there is nothing
+  // to thread and the chain is exactly what it always was.
   const built = freshApp();
   const threadRef = "web:U1:thread-plain-off";
   await built.app.turn(webTurn(threadRef, "hello"));
@@ -1019,8 +1017,8 @@ test("with the flag off a reply still threads under the message that triggered i
   }
 
   const added = await addedSince(built, session.id, before);
-  const user = ofType(added, "user")[0]!;
-  assert.equal(ofType(added, "assistant").at(-1)!.parentSeq, user.seq);
+  const reply = ofType(added, "assistant").at(-1)!;
+  assert.equal(reply.parentSeq, reply.seq - 1);
 });
 
 test("a room whose agents are all disabled falls back to a single ordinary turn", async () => {

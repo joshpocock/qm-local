@@ -37,6 +37,8 @@ export interface ThreadableMessage {
   role?: string;
   seq?: number;
   parentSeq?: number | null;
+  /** Set on a reply that spoke AS an agent — the mark of a panel, i.e. of a real thread. */
+  persona?: { id?: string; name?: string } | null;
 }
 
 /**
@@ -88,6 +90,12 @@ export interface TranscriptRow {
 export interface GroupOptions {
   /** Index of the streaming partial, when one is being rendered. */
   liveIndex?: number | null;
+  /**
+   * Whether this session shows threads at all. False on an ordinary one-on-one chat, where
+   * a lone agent answering is just the next message; rows there unfold unless a human typed
+   * into one (see `flattenUntypedRows`). Defaults to true.
+   */
+  threadsAllowed?: boolean;
 }
 
 /** Both roles the composer and the transcript use for a human turn. */
@@ -181,7 +189,49 @@ export function groupRoomTranscript(
     });
   }
 
-  return rows;
+  return unfoldPlainRows(messages, rows, opts.threadsAllowed !== false);
+}
+
+/**
+ * Unfolds rows back into plain messages unless the thread is a real one.
+ *
+ * One agent answering one person is a conversation, not a thread: folding it shows a plain
+ * chat as a column of collapsed "1 reply" rows with the conversation hidden inside them.
+ * The seq arithmetic cannot tell the two apart — a room's first reply names the message it
+ * answers, which is often the linear parent too — so the decision is made on what the
+ * replies ARE:
+ *
+ * - a reply that spoke as an agent (`persona`) is a panel's, and panels are threads;
+ * - a reply a human typed is the reply-in-thread composer's, and that is a thread the
+ *   person made deliberately;
+ * - a row still streaming keeps its shape rather than unfolding and re-folding as the
+ *   partial settles, but only where threads are possible at all.
+ *
+ * Anything else unfolds in place: the parent keeps its row and each reply gets its own, in
+ * the order they were already in. Nothing stops rendering — it stops being folded away.
+ */
+function unfoldPlainRows(
+  messages: readonly ThreadableMessage[],
+  rows: readonly TranscriptRow[],
+  threadsAllowed: boolean,
+): TranscriptRow[] {
+  const isThread = (row: TranscriptRow): boolean =>
+    (row.live && threadsAllowed) ||
+    row.replies.some((index) => {
+      const message = messages[index];
+      return isUserRole(message?.role) || Boolean(message?.persona);
+    });
+
+  const out: TranscriptRow[] = [];
+  for (const row of rows) {
+    if (isThread(row)) {
+      out.push(row);
+      continue;
+    }
+    out.push({ index: row.index, replies: [], live: false });
+    for (const index of row.replies) out.push({ index, replies: [], live: false });
+  }
+  return out;
 }
 
 /**

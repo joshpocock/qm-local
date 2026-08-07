@@ -2319,7 +2319,14 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                   }
                   if (stored.type !== "assistant") return undefined;
                   if (input.panel) return spine.turnUserEntrySeq ?? priorUserEntrySeq;
-                  return spine.turnUserEntrySeq;
+                  // An ordinary one-on-one turn stays LINEAR. Threading a lone agent's answer
+                  // under the message it answered is technically true and practically useless:
+                  // every exchange becomes a thread of one, and a plain chat turns into a list
+                  // of collapsed rows with the conversation hidden inside them. A thread earns
+                  // its shape when there is something to separate — several personas answering
+                  // the same message (the panel above), or a human deliberately replying into
+                  // one (below).
+                  return input.replyToSeq !== undefined ? spine.turnUserEntrySeq : undefined;
                 })();
                 const appended = await withManagedRosterVersion(() =>
                   deps.sessions.append(

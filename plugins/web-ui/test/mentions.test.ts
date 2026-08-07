@@ -196,15 +196,18 @@ interface Row {
   seq: number;
   parentSeq?: number | null;
   text: string;
+  persona?: { id?: string; name?: string } | null;
 }
 const textOf = (m: Row): string => m.text;
 
+// A room transcript: every reply spoke as an agent, which is what makes the row a thread.
+const SPEAKER = { id: "a1", name: "Scout" };
 const TRANSCRIPT: Row[] = [
   { role: "user", seq: 1, parentSeq: null, text: "what do you think?" },
-  { role: "assistant", seq: 2, parentSeq: 1, text: "I think we ship it." },
-  { role: "assistant", seq: 3, parentSeq: 1, text: "PASS" },
-  { role: "assistant", seq: 4, parentSeq: 1, text: "  PASS\n" },
-  { role: "assistant", seq: 5, parentSeq: 1, text: "One caveat." },
+  { role: "assistant", seq: 2, parentSeq: 1, text: "I think we ship it.", persona: SPEAKER },
+  { role: "assistant", seq: 3, parentSeq: 1, text: "PASS", persona: SPEAKER },
+  { role: "assistant", seq: 4, parentSeq: 1, text: "  PASS\n", persona: SPEAKER },
+  { role: "assistant", seq: 5, parentSeq: 1, text: "One caveat.", persona: SPEAKER },
 ];
 
 test("a room drops stored PASS replies, however they were whitespaced", () => {

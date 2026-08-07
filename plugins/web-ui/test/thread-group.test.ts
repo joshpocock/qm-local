@@ -20,7 +20,13 @@ function user(seq: number): ThreadableMessage {
   return { role: "user", seq, parentSeq: seq - 1 };
 }
 
+/** A panel reply: it spoke as an agent, which is what makes a row a thread. */
 function reply(seq: number, parentSeq: number | null): ThreadableMessage {
+  return { role: "assistant", seq, parentSeq, persona: { id: "ap_1", name: "Critic" } };
+}
+
+/** A lone agent answering in a one-on-one chat — no persona, so no thread. */
+function plainReply(seq: number, parentSeq: number | null): ThreadableMessage {
   return { role: "assistant", seq, parentSeq };
 }
 
@@ -352,7 +358,9 @@ test("a room's entries thread once core parents its replies at the human turn", 
   assert.equal(messages[1]!.persona?.name, "Scout");
 });
 
-test("a 1:1 session's entries thread the same way once its final reply is parented at the human turn", () => {
+test("a 1:1 session's entries stay flat even when the reply names the human turn", () => {
+  // The parent link is still stored; what changed is that a lone agent's answer is not a
+  // thread, so the transcript renders it as the next message instead of folding it away.
   const entries: SessionEntry[] = [
     entry(1, "user", { text: "what's the plan?" }, 0),
     entry(2, "assistant", { text: "Ship it." }, 1),
@@ -360,7 +368,10 @@ test("a 1:1 session's entries thread the same way once its final reply is parent
   const messages = entriesToMessages(entries, MODEL) as unknown as Array<AssistantWork & ThreadableMessage>;
   assert.equal(messages[1]!.parentSeq, 1);
   const rows = groupRoomTranscript(messages);
-  assert.deepEqual(rows, [{ index: 0, replies: [1], live: false }]);
+  assert.deepEqual(rows, [
+    { index: 0, replies: [], live: false },
+    { index: 1, replies: [], live: false },
+  ]);
 });
 
 test("the same entries under the old linear parentSeq chain stay flat", () => {
@@ -386,11 +397,8 @@ test("the same entries under the old linear parentSeq chain stay flat", () => {
 
 const chat = readFileSync(new URL("../src/chat.ts", import.meta.url), "utf8");
 
-test("the transcript grouper is no longer gated on room mode", () => {
-  assert.match(
-    chat,
-    /groupRoomTranscript\(messages as unknown as readonly ThreadableMessage\[\], \{\s*\n\s*liveIndex: liveIndexIn\(agent, messages\),\s*\n\s*\}\)/,
-  );
+test("only a room threads by default — a one-on-one chat unfolds", () => {
+  assert.match(chat, /threadsAllowed: isRoomThread\(chatState\.threadRef\)/);
 });
 
 test("the streaming partial is handed to the grouper as the live reply", () => {
@@ -490,4 +498,57 @@ test("an aside send spends none of the main composer's state", () => {
   assert.match(body, /if \(!aside\) \{\s*\n\s*clearActiveDraft\(\);\s*\n\s*resetComposer\(\);\s*\n\s*\}/);
   assert.match(body, /if \(!aside\) clearComposerDom\(agent\);/);
   assert.match(body, /if \(agent\.state\.isStreaming\) return aside \? undefined : sendSteer\(agent\);/);
+});
+
+// ---------------------------------------------------------------------------
+// threadsAllowed — a one-on-one chat is not a column of threads-of-one
+// ---------------------------------------------------------------------------
+
+test("without threads, an agent's answer renders as the next message", () => {
+  const messages = [user(1), plainReply(2, 1), user(3), plainReply(4, 3)];
+  const rows = groupRoomTranscript(messages, { threadsAllowed: false });
+  assert.deepEqual(
+    rows.map((row) => [row.index, row.replies]),
+    [
+      [0, []],
+      [1, []],
+      [2, []],
+      [3, []],
+    ],
+  );
+  assert.deepEqual(coverage(rows), [0, 1, 2, 3]);
+});
+
+test("without threads, a thread the person typed into survives", () => {
+  // root ← the human's reply into it ← the answer that reply drew.
+  const typed: ThreadableMessage = { role: "user", seq: 3, parentSeq: 1 };
+  const messages = [user(1), plainReply(2, 1), typed, plainReply(4, 3)];
+  const rows = groupRoomTranscript(messages, { threadsAllowed: false });
+  assert.deepEqual(
+    rows.map((row) => [row.index, row.replies]),
+    [[0, [1, 2, 3]]],
+  );
+  assert.deepEqual(coverage(rows), [0, 1, 2, 3]);
+});
+
+test("threads are allowed unless the caller says otherwise", () => {
+  const messages = [user(1), reply(2, 1)];
+  assert.deepEqual(groupRoomTranscript(messages, {})[0]?.replies, [1]);
+  assert.deepEqual(groupRoomTranscript(messages, { threadsAllowed: true })[0]?.replies, [1]);
+});
+
+test("a plain exchange in a room's history is not folded into a thread of one", () => {
+  // What a promoted session looks like: an ordinary exchange, then an @tag that made it a
+  // room. The room's reply threads; the exchange that came before it stays a conversation.
+  const messages = [user(1), plainReply(2, 1), user(3), reply(4, 3)];
+  const rows = groupRoomTranscript(messages, { threadsAllowed: true });
+  assert.deepEqual(
+    rows.map((row) => [row.index, row.replies]),
+    [
+      [0, []],
+      [1, []],
+      [2, [3]],
+    ],
+  );
+  assert.deepEqual(coverage(rows), [0, 1, 2, 3]);
 });

@@ -1171,6 +1171,10 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
   function buildTranscriptRows(agent: Agent, messages: AgentMessage[]): TranscriptRow[] {
     const rows = groupRoomTranscript(messages as unknown as readonly ThreadableMessage[], {
       liveIndex: liveIndexIn(agent, messages),
+      // Only a room threads by default. One agent answering one person is a conversation,
+      // not a thread of one — see `flattenUntypedRows`, which still keeps any thread the
+      // person opened themselves with the reply composer.
+      threadsAllowed: isRoomThread(chatState.threadRef),
     });
     const liveRow = rows.find((row) => row.live) ?? null;
     if (liveRow) {
