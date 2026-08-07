@@ -39,14 +39,31 @@ export function usesSlackOidc(config: QmConfig): boolean {
   );
 }
 
-export function renderSlackManifests(config: QmConfig): SlackManifests {
+/** Slack caps an app's display name at 35 characters; keep whatever we render inside it. */
+export const SLACK_APP_NAME_MAX = 35;
+
+/** The default bot's name, and the fallback whenever a per-bot name is empty or unusable. */
+export const DEFAULT_SLACK_APP_NAME = "qm";
+
+/**
+ * A Slack app display name for one bot. Multi-bot deployments render one manifest per bot with
+ * the persona's name (a "Codex" bot, a "Claude Code" bot), so each Slack app is recognisable in
+ * the workspace; with no name given this is the historical "qm".
+ */
+export function slackAppName(name?: string): string {
+  const cleaned = (name ?? "").replace(/\s+/g, " ").trim().slice(0, SLACK_APP_NAME_MAX);
+  return cleaned || DEFAULT_SLACK_APP_NAME;
+}
+
+export function renderSlackManifests(config: QmConfig, opts: { name?: string } = {}): SlackManifests {
   const bot = JSON.parse(template("slack-manifest.json")) as {
     display_information: { name: string; description: string };
     features: { bot_user: { display_name: string } };
   };
-  bot.display_information.name = "qm";
+  const name = slackAppName(opts.name);
+  bot.display_information.name = name;
   bot.display_information.description = `qm workspace agent for ${config.orgId}`;
-  bot.features.bot_user.display_name = "qm";
+  bot.features.bot_user.display_name = name;
 
   const sso = JSON.parse(template("slack-sso-manifest.json")) as {
     oauth_config: { redirect_urls: string[] };

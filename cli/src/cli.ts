@@ -411,11 +411,13 @@ async function dispatch(argv: string[]): Promise<void> {
     }
 
     case "slack": {
-      rejectUnknownFlags(flags, ["config", "env-file", "sandbox-dir", "target"]);
+      rejectUnknownFlags(flags, ["config", "env-file", "sandbox-dir", "target", "name"]);
       rejectExtraPositionals(positionals, 1);
-      if (positionals[0] !== "render") throw new CliError(`usage: ${CLI_NAME} slack render`);
+      if (positionals[0] !== "render") throw new CliError(`usage: ${CLI_NAME} slack render [--name <bot>]`);
       const ctx = deployContext(flags);
-      renderSlackFiles(ctx.config, ctx.configDir);
+      // --name renders a manifest for an ADDITIONAL bot (see docs/slack-multi-bot.md).
+      const botName = typeof flags.name === "string" ? flags.name : undefined;
+      renderSlackFiles(ctx.config, ctx.configDir, botName);
       return;
     }
 

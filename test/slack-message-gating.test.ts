@@ -288,3 +288,29 @@ test("createInFlightThreadMap: clear is runId-guarded so a finished run can't un
   runs.clear("dm:C1", "run-2");
   assert.equal(runs.get("dm:C1"), undefined);
 });
+
+test("a sibling qm bot's message is ignored, while third-party bots still get through", async () => {
+  const { registerSlackBotIdentity, registeredSlackBotIdentities } = await import("../src/slack/message-gating.ts");
+
+  const peer = { subtype: "bot_message", bot_id: "BGITHUB", user: "UGITHUB" };
+  const sibling = { subtype: "bot_message", bot_id: "BCODEX", user: "UCODEX" };
+
+  // With one bot running, nothing is registered beyond its own ids: today's behaviour exactly.
+  assert.equal(shouldProcessMessage(peer, "UBOT", "BBOT"), true);
+  assert.equal(shouldProcessMessage(sibling, "UBOT", "BBOT"), true);
+
+  const unregister = registerSlackBotIdentity({ botUserId: "UCODEX", ownBotId: "BCODEX" });
+  try {
+    assert.ok(registeredSlackBotIdentities().has("UCODEX"));
+    // A second qm bot in the same thread would otherwise answer this forever.
+    assert.equal(shouldProcessMessage(sibling, "UBOT", "BBOT"), false);
+    assert.equal(shouldProcessMessage({ bot_id: "BCODEX" }, "UBOT", "BBOT"), false);
+    // A genuine third-party bot is untouched.
+    assert.equal(shouldProcessMessage(peer, "UBOT", "BBOT"), true);
+    assert.equal(shouldProcessMessage({ user: "U1", text: "hi" } as never, "UBOT", "BBOT"), true);
+  } finally {
+    unregister();
+  }
+  assert.equal(shouldProcessMessage(sibling, "UBOT", "BBOT"), true, "a stopped bot releases its identity");
+  assert.equal(registeredSlackBotIdentities().has("UCODEX"), false);
+});

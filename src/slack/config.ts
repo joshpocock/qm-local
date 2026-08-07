@@ -21,6 +21,24 @@ export interface SlackPluginConfig {
   userCacheTtlMs?: number;
   botIdentity?: { username?: string; icon_emoji?: string };
   devIntrospection?: { port: number };
+  /**
+   * Run every turn this bot receives AS this agent persona (its harness, model and
+   * instructions) instead of the default org agent. Delivered to core as a single-member room
+   * roster on the turn request, so the whole persona path is the one agent rooms already use.
+   * Requires QM_AGENT_ROOMS; ignored by core when the flag is off.
+   */
+  personaId?: string;
+  /**
+   * This instance is an ADDITIONAL bot running beside the default one. Secondary instances
+   * deliberately keep their hands off everything that is process-global or a shared queue:
+   * no directory/mention-index push (`replaceChannels` is a REPLACE), no delivery polling and
+   * no surface-context fulfilment (both are org-wide queues with no per-bot ownership, so a
+   * second claimant would post under the wrong identity), no dev-introspection port, and no
+   * global bot-identity override.
+   */
+  secondary?: boolean;
+  /** Human label for logs, e.g. the registry record's label. */
+  instanceLabel?: string;
 }
 
 export function slackPluginConfigFromEnv(env: Record<string, string | undefined>): SlackPluginConfig | null {

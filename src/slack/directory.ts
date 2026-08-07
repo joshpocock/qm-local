@@ -92,8 +92,16 @@ export function createDirectory(deps: {
   channelMembersTtlMs?: number;
   maxPrivateChannels?: number;
   userCacheTtlMs?: number;
+  /**
+   * Push this workspace's members/channels into core, and own the process-global mention
+   * index. Default true. An ADDITIONAL Slack bot sets it false: it sees only the channels it
+   * was invited to, and upsertChannels REPLACES the org's channel list, so a secondary push
+   * would truncate the directory the primary bot maintains.
+   */
+  syncDirectory?: boolean;
 }): Directory {
   const { core, ids } = deps;
+  const SYNC_DIRECTORY = deps.syncDirectory !== false;
   const USER_SNAPSHOT_TTL_MS = deps.userSnapshotTtlMs ?? 5 * 60_000;
   const CHANNEL_MEMBERS_TTL_MS = deps.channelMembersTtlMs ?? 30 * 60_000;
   const MAX_PRIVATE_CHANNELS = deps.maxPrivateChannels ?? 50;
@@ -133,7 +141,7 @@ export function createDirectory(deps: {
         }
       }
     }
-    setMentionIndex(mentionIndex);
+    if (SYNC_DIRECTORY) setMentionIndex(mentionIndex);
     if (missingEmails > 0) {
       console.warn(
         `[slack] email identity mode: ${missingEmails} own-team member(s) have no visible email (missing users:read.email scope?) — they fail closed to guest`,
@@ -323,6 +331,7 @@ export function createDirectory(deps: {
   }
 
   async function pushDirectory(snap: UserSnapshot, client: any): Promise<void> {
+    if (!SYNC_DIRECTORY) return;
     const members = [...snap.byId.entries()]
       .filter(([, u]) => !u.actor.isExternalGuest)
       .map(([slackId, u]) => {

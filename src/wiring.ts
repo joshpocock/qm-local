@@ -267,6 +267,11 @@ import { createPostgresMetricsSink } from "./admin/postgres-metrics-sink.ts";
 import { errMessage, swallowAs } from "./util/errors.ts";
 import { sleep } from "./util/async.ts";
 import { createSlackInstallationStore, type SlackInstallationStore } from "./surfaces/slack-installation.ts";
+import {
+  createSlackBotRegistry,
+  type SlackBotRegistry,
+  type StoredSlackBot,
+} from "./surfaces/slack-bot-registry.ts";
 
 export interface Runtime {
   start(): void;
@@ -315,6 +320,8 @@ export interface BuiltApp {
   config: ScopedConfigStore;
   connectorTokens: ConnectorTokenStore;
   slackInstallation: SlackInstallationStore;
+  /** ADDITIONAL Slack bots beyond `slackInstallation`, which stays the default one. */
+  slackBots: SlackBotRegistry;
   resolveClient: OAuthClientResolver;
   consentLinks: ConsentLinkStore;
   secretDrops: SecretDropStore;
@@ -453,10 +460,16 @@ export function buildApp(
     resets: artifactMap<DeviceFlowCutoverReset>("device_flow_cutover_resets"),
   });
   const connectorStatusCache = createConnectorStatusCache(artifactMap<ConnectorStatusRecord>("connector_status"));
+  const slackSecretKey = config.connectorSecretKey ?? randomBytes(32);
   const slackInstallation = createSlackInstallationStore(
     config.orgId,
     artifactMap("slack_installation"),
-    config.connectorSecretKey ?? randomBytes(32),
+    slackSecretKey,
+  );
+  const slackBots = createSlackBotRegistry(
+    config.orgId,
+    artifactMap<StoredSlackBot>("slack_bot_registry"),
+    slackSecretKey,
   );
   const deploymentLayer = config.deploymentLayerDir
     ? loadDeploymentLayer(config.deploymentLayerDir)
@@ -1387,6 +1400,7 @@ export function buildApp(
     config: configStore,
     connectorTokens,
     slackInstallation,
+    slackBots,
     resolveClient,
     consentLinks,
     secretDrops,

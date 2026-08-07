@@ -2,6 +2,7 @@ import { swallow, swallowAs } from "../util/errors.ts";
 import bolt from "@slack/bolt";
 import { WebClient } from "@slack/web-api";
 import { createDeduper, createThreadTracker } from "./lib.ts";
+import { registerSlackBotIdentity } from "./message-gating.ts";
 import { installDevIntrospection } from "./dev-introspection.ts";
 import { setDefaultBotIdentity, createSurfaceHeaderEnsurer, type SurfaceHeaderClient } from "./delivery.ts";
 import { NO_RETRY, type SlackPluginConfig, normalizeSlackApiUrl, slackPluginConfigFromEnv } from "./config.ts";
@@ -102,10 +103,12 @@ export async function startSlackPlugin(
     logLevel: (cfg.logLevel as any) ?? LogLevel.INFO,
     clientOptions: { ...CLIENT_OPTIONS },
   });
-  setDefaultBotIdentity(cfg.botIdentity);
+  // Process-global: only the primary instance owns the outbound username/icon override, so a
+  // second bot starting up cannot clear or replace the first one's identity.
+  if (!cfg.secondary) setDefaultBotIdentity(cfg.botIdentity);
   const devIntrospection = installDevIntrospection(
     app,
-    cfg.devIntrospection ? { enabled: true, port: cfg.devIntrospection.port } : {},
+    cfg.devIntrospection && !cfg.secondary ? { enabled: true, port: cfg.devIntrospection.port } : {},
   );
 
   const deduper = createDeduper(1000);
@@ -120,6 +123,9 @@ export async function startSlackPlugin(
     ...(cfg.channelMembersTtlMs ? { channelMembersTtlMs: cfg.channelMembersTtlMs } : {}),
     ...(cfg.maxPrivateChannels ? { maxPrivateChannels: cfg.maxPrivateChannels } : {}),
     ...(cfg.userCacheTtlMs ? { userCacheTtlMs: cfg.userCacheTtlMs } : {}),
+    // `pushDirectory` REPLACES the org's channel list; a secondary bot sees only the channels
+    // it was invited to, so letting it push would truncate the primary's directory.
+    ...(cfg.secondary ? { syncDirectory: false } : {}),
   });
   const mirror = createMirror({ core, ids, directory, externalParticipantsEnabled });
   const serializer = createConversationSerializer({
@@ -153,6 +159,7 @@ export async function startSlackPlugin(
     botToken: BOT_TOKEN,
     ...(TRUSTED_FILE_HOST ? { trustedFileHost: TRUSTED_FILE_HOST } : {}),
     ensureHeader,
+    ...(cfg.personaId ? { personaId: cfg.personaId } : {}),
   });
   approvals.registerActions(app);
   registerSlackEvents(app, {
@@ -174,7 +181,15 @@ export async function startSlackPlugin(
     ...(cfg.userToken ? { userToken: cfg.userToken } : {}),
     clientOptions: CLIENT_OPTIONS,
   });
-  const deliveries = createDeliveryPoller({ core, bridge, mirror, threads, clientForIdentity });
+  // `claimDeliveries("slack")` and `pendingContextRequests("slack")` are ORG-WIDE queues with no
+  // per-bot ownership. Running them on more than one instance would hand a reply to whichever
+  // bot claimed it first, so it would arrive under an arbitrary identity. Only the primary
+  // instance services them; a secondary bot's recovery-path delivery is therefore posted by the
+  // default bot (documented in docs/slack-multi-bot.md).
+  const servicesQueues = !cfg.secondary;
+  const deliveries = servicesQueues
+    ? createDeliveryPoller({ core, bridge, mirror, threads, clientForIdentity })
+    : undefined;
 
   let auth: any;
   try {
@@ -202,9 +217,14 @@ export async function startSlackPlugin(
     await app.stop().catch(swallowAs("slack: app.stop on failed start", undefined));
     throw err;
   }
+  // Sibling qm bots must not answer each other: both hold stake in a shared thread, so an
+  // unguarded exchange would ping-pong forever. Third-party bots are unaffected.
+  const unregisterIdentity = registerSlackBotIdentity({ botUserId: ids.botUserId, ownBotId: ids.ownBotId });
   devIntrospection?.ready({ connectedAs: auth.user ?? "", botUserId: ids.botUserId, teamId: ids.ownTeamId });
+  const instanceNote = cfg.instanceLabel ? ` [${cfg.instanceLabel}]` : "";
+  const personaNote = cfg.personaId ? `; speaking as persona ${cfg.personaId}` : "";
   console.log(
-    `[slack-plugin] connected as @${auth.user} (bot ${ids.botUserId}) in team ${auth.team} (${ids.ownTeamId}); in-process core`,
+    `[slack-plugin]${instanceNote} connected as @${auth.user} (bot ${ids.botUserId}) in team ${auth.team} (${ids.ownTeamId}); in-process core${personaNote}`,
   );
   void directory.getUserSnapshot(app.client).catch(swallowAs("slack: initial user snapshot", undefined));
   ackEmoji.refreshAckEmoji(app.client);
@@ -212,7 +232,7 @@ export async function startSlackPlugin(
   let deliveriesPollInFlight = false;
   let deliveriesPollAgain = false;
   const drainDeliveries = (): void => {
-    if (stopped) return;
+    if (stopped || !deliveries) return;
     if (deliveriesPollInFlight) {
       deliveriesPollAgain = true;
       return;
@@ -226,8 +246,8 @@ export async function startSlackPlugin(
       }
     });
   };
-  const unsubscribeDeliveries = core.onDeliveryEnqueued(drainDeliveries);
-  const deliveriesTimer = setInterval(drainDeliveries, 60_000);
+  const unsubscribeDeliveries = deliveries ? core.onDeliveryEnqueued(drainDeliveries) : undefined;
+  const deliveriesTimer = deliveries ? setInterval(drainDeliveries, 60_000) : undefined;
   drainDeliveries();
 
   const contextRequestsInFlight = new Set<string>();
@@ -237,11 +257,13 @@ export async function startSlackPlugin(
     contextRequestsInFlight.add(r.id);
     void surfaceContext.fulfillSurfaceContext(app.client, r).finally(() => contextRequestsInFlight.delete(r.id));
   };
-  const unsubscribeContextRequests = core.onContextRequest(serviceContextRequest);
-  void core
-    .pendingContextRequests()
-    .then((pending) => pending.forEach(serviceContextRequest))
-    .catch(swallowAs("slack: context request drain", undefined));
+  const unsubscribeContextRequests = servicesQueues ? core.onContextRequest(serviceContextRequest) : undefined;
+  if (servicesQueues) {
+    void core
+      .pendingContextRequests()
+      .then((pending) => pending.forEach(serviceContextRequest))
+      .catch(swallowAs("slack: context request drain", undefined));
+  }
 
   return {
     async stop(): Promise<void> {
@@ -250,9 +272,10 @@ export async function startSlackPlugin(
         return;
       }
       stopped = true;
-      clearInterval(deliveriesTimer);
-      unsubscribeDeliveries();
-      unsubscribeContextRequests();
+      unregisterIdentity();
+      if (deliveriesTimer) clearInterval(deliveriesTimer);
+      unsubscribeDeliveries?.();
+      unsubscribeContextRequests?.();
       try {
         await app.stop();
       } finally {

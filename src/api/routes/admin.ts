@@ -32,6 +32,7 @@ import {
   listSlackMirrorMessages,
 } from "./admin/slack-mirror.ts";
 import { deleteSlackInstallation, getSlackInstallation, putSlackInstallation } from "./admin/slack-installation.ts";
+import { createSlackBot, deleteSlackBot, listSlackBotAgents, listSlackBots, updateSlackBot } from "./admin/slack-bots.ts";
 import { deleteModelProvider, getModelProviders, putModelProvider } from "./admin/model-providers.ts";
 
 const timed =
@@ -55,6 +56,11 @@ const routes: ReadonlyArray<Route<ApiCtx>> = [
   { method: "GET", path: "/v1/admin/slack-installation", auth: "either", handle: getSlackInstallation },
   { method: "PUT", path: "/v1/admin/slack-installation", auth: "either", handle: putSlackInstallation },
   { method: "DELETE", path: "/v1/admin/slack-installation", auth: "either", handle: deleteSlackInstallation },
+  { method: "GET", path: "/v1/admin/slack-bots", auth: "either", handle: listSlackBots },
+  { method: "GET", path: "/v1/admin/slack-bots/agents", auth: "either", handle: listSlackBotAgents },
+  { method: "POST", path: "/v1/admin/slack-bots", auth: "either", handle: createSlackBot },
+  { method: "PUT", path: "/v1/admin/slack-bots/:id", auth: "either", handle: updateSlackBot },
+  { method: "DELETE", path: "/v1/admin/slack-bots/:id", auth: "either", handle: deleteSlackBot },
   { method: "GET", path: "/v1/admin/model-providers", auth: "either", handle: getModelProviders },
   { method: "PUT", path: "/v1/admin/model-providers/:provider", auth: "either", handle: putModelProvider },
   { method: "DELETE", path: "/v1/admin/model-providers/:provider", auth: "either", handle: deleteModelProvider },

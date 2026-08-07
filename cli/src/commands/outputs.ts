@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { QmConfig } from "../config.ts";
 import { hostingProvider } from "../backends/registry.ts";
 import { CliError, note, ok } from "../log.ts";
-import { renderSlackManifests, slackManifestCreationUrl, usesSlackOidc } from "../slack-manifests.ts";
+import { renderSlackManifests, slackAppName, slackManifestCreationUrl, usesSlackOidc } from "../slack-manifests.ts";
 
 export interface DeploymentOutputs {
   provider: QmConfig["target"];
@@ -97,7 +97,24 @@ export function runOutputs(config: QmConfig, configDir: string, json: boolean): 
   }
 }
 
-export function renderSlackFiles(config: QmConfig, configDir: string): void {
+/**
+ * `name` renders an ADDITIONAL bot's manifest — a second Slack app for a persona-bound bot —
+ * into its own file, leaving the default `slack-app-manifest.yml` (and the SSO app, which is
+ * per-deployment, not per-bot) alone.
+ */
+export function renderSlackFiles(config: QmConfig, configDir: string, name?: string): void {
+  if (name) {
+    const manifests = renderSlackManifests(config, { name });
+    const slug =
+      slackAppName(name)
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-|-$/g, "") || "bot";
+    const path = join(configDir, `slack-app-manifest-${slug}.yml`);
+    writeFileSync(path, manifests.bot);
+    ok(`rendered Slack bot app manifest for "${slackAppName(name)}" (${path})`);
+    return;
+  }
   const manifests = renderSlackManifests(config);
   const ssoPath = join(configDir, "slack-sso-manifest.yml");
   writeFileSync(join(configDir, "slack-app-manifest.yml"), manifests.bot);

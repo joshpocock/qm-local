@@ -301,7 +301,14 @@ async function waitFor(cond: () => boolean, timeoutMs = 2000): Promise<void> {
   }
 }
 
-async function fixture(options: { externalParticipants?: boolean; webUiPublicUrl?: string } = {}) {
+async function fixture(
+  options: {
+    externalParticipants?: boolean;
+    webUiPublicUrl?: string;
+    personaId?: string;
+    secondary?: boolean;
+  } = {},
+) {
   const core = new FakeCore();
   core.externalParticipants = options.externalParticipants ?? false;
   const started = startSlackPlugin(
@@ -310,6 +317,8 @@ async function fixture(options: { externalParticipants?: boolean; webUiPublicUrl
       appToken: "xapp-test",
       identityEmail: "0",
       ...(options.webUiPublicUrl ? { webUiPublicUrl: options.webUiPublicUrl } : {}),
+      ...(options.personaId ? { personaId: options.personaId } : {}),
+      ...(options.secondary ? { secondary: true } : {}),
     },
     core,
   );
@@ -862,5 +871,66 @@ test("stop aborts the active run without enqueuing a second turn", async () => {
     assert.equal(f.client.posts.length, 0);
   } finally {
     await f.stop();
+  }
+});
+
+test("a persona-bound bot submits every turn as a single-member room roster", async () => {
+  const f = await fixture({ personaId: "persona-codex" });
+  try {
+    await f.app.emitMessage({ channel: "D9", channel_type: "im", user: "U1", text: "ship it", ts: "900.1" });
+    assert.equal(f.core.turns.length, 1);
+    // Core validates and runs this exactly like a web room opened with one agent, so the turn
+    // takes the persona's harness, model and instructions (src/api/app-turn.ts roomFromRequest).
+    assert.deepEqual(f.core.turns[0].room, { personaIds: ["persona-codex"], rounds: 1 });
+    assert.equal(f.core.turns[0].conversation.threadRef, "dm:D9");
+  } finally {
+    await f.stop();
+  }
+});
+
+test("a channel mention on a persona-bound bot carries the roster too", async () => {
+  const f = await fixture({ personaId: "persona-claude" });
+  try {
+    await f.app.emitEvent("app_mention", {
+      channel: "C1",
+      user: "U1",
+      text: "<@UBOT> review this",
+      ts: "901.1",
+    });
+    assert.equal(f.core.turns.length, 1);
+    assert.deepEqual(f.core.turns[0].room, { personaIds: ["persona-claude"], rounds: 1 });
+  } finally {
+    await f.stop();
+  }
+});
+
+test("the default bot never sends a room roster, so today's behaviour is untouched", async () => {
+  const f = await fixture();
+  try {
+    await f.app.emitMessage({ channel: "D1", channel_type: "im", user: "U1", text: "hello", ts: "902.1" });
+    assert.equal(f.core.turns.length, 1);
+    assert.equal(f.core.turns[0].room, undefined);
+  } finally {
+    await f.stop();
+  }
+});
+
+test("a secondary bot never pushes the directory, which would REPLACE the org's channel list", async () => {
+  const primary = await fixture();
+  try {
+    await primary.app.emitMessage({ channel: "D1", channel_type: "im", user: "U1", text: "hi", ts: "903.1" });
+    await waitFor(() => primary.core.directories.length > 0);
+  } finally {
+    await primary.stop();
+  }
+
+  const secondary = await fixture({ secondary: true, personaId: "persona-codex" });
+  try {
+    await secondary.app.emitMessage({ channel: "D1", channel_type: "im", user: "U1", text: "hi", ts: "903.2" });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.deepEqual(secondary.core.directories, [], "an additional bot sees fewer channels; it must not push them");
+    assert.equal(secondary.core.turns.length, 1, "it still takes its own turns");
+  } finally {
+    await secondary.stop();
   }
 });

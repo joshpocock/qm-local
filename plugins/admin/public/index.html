@@ -4798,6 +4798,72 @@
                 ><span class="status" id="st-slack-installation"></span>
               </div>
             </section>
+            <section class="card" id="card-slack-bots">
+              <div class="head">
+                <h2>Slack bots</h2>
+                <p>
+                  Additional Slack apps beyond the default bot above, each optionally bound to an agent persona. A
+                  persona-bound bot answers as that persona; additional bots require Socket Mode. Tokens are validated
+                  with Slack, encrypted in durable storage, and never displayed again.
+                </p>
+              </div>
+              <div class="body">
+                <p class="hint" id="slack-bots-mode-hint"></p>
+                <div id="slack-bots-list" class="hint">No additional Slack bots configured.</div>
+              </div>
+              <div class="body" style="border-top: 1px solid var(--border, #2a2a2a); padding-top: 12px">
+                <p class="hint">Add a Slack bot</p>
+                <p>
+                  <a
+                    id="slack-bots-create"
+                    href="https://api.slack.com/apps?new_app=1"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    >Create Slack app from manifest ↗</a
+                  >
+                </p>
+                <label style="display: block; margin-bottom: 8px"
+                  >Label
+                  <input
+                    type="text"
+                    id="slack-bot-new-label"
+                    autocomplete="off"
+                    placeholder="e.g. Codex"
+                    style="width: 100%"
+                /></label>
+                <label style="display: block; margin-bottom: 8px"
+                  >Bot User OAuth Token
+                  <input
+                    type="password"
+                    id="slack-bot-new-token"
+                    autocomplete="off"
+                    placeholder="xoxb-…"
+                    style="width: 100%"
+                /></label>
+                <label style="display: block; margin-bottom: 8px"
+                  >App-Level Token
+                  <input
+                    type="password"
+                    id="slack-bot-new-app-token"
+                    autocomplete="off"
+                    placeholder="xapp-…"
+                    style="width: 100%"
+                /></label>
+                <label style="display: block; margin-bottom: 8px"
+                  >Answers as
+                  <select id="slack-bot-new-persona" style="width: 100%">
+                    <option value="">Default org agent</option>
+                  </select></label>
+                <p class="field-hint">
+                  A bound agent must be homed in an org, team, or channel scope (not a personal scope) to work for
+                  every Slack user.
+                </p>
+              </div>
+              <div class="foot">
+                <button class="primary" id="slack-bots-save">Validate and save</button
+                ><span class="status" id="st-slack-bots"></span>
+              </div>
+            </section>
           </div>
 
           <div id="view-data" class="hidden"></div>
@@ -7218,6 +7284,7 @@
           $("conn-provider").disabled = true;
         } else resetConnForm();
         await loadSlackInstallation();
+        await loadSlackBots();
       }
       function renderConnList(list) {
         connList = list;
@@ -7426,6 +7493,173 @@
         await loadSlackInstallation();
         setStatus("st-slack-installation", "Removed", "ok");
       };
+
+      let slackBots = [];
+      // id → name for every persona the admin can see; raw ids still render when a bot is
+      // bound to a persona outside that set (e.g. someone's personal-scope agent).
+      let slackBotAgentNames = new Map();
+      async function loadSlackBotAgents() {
+        const r = await api("GET", "/api/slack-bots/agents");
+        if (!r.ok || !Array.isArray(r.data?.agents)) return;
+        slackBotAgentNames = new Map(r.data.agents.map((a) => [a.id, a.name]));
+        const sel = $("slack-bot-new-persona");
+        if (!sel) return;
+        const previous = sel.value;
+        while (sel.options.length > 1) sel.remove(1);
+        for (const a of r.data.agents) {
+          if (!a.enabled) continue;
+          const opt = document.createElement("option");
+          opt.value = a.id;
+          opt.textContent = a.name;
+          sel.append(opt);
+        }
+        sel.value = previous && slackBotAgentNames.has(previous) ? previous : "";
+      }
+      function renderSlackBotsList(bots) {
+        slackBots = bots;
+        const root = $("slack-bots-list");
+        root.textContent = "";
+        if (!bots.length) {
+          root.className = "hint";
+          root.textContent = "No additional Slack bots configured.";
+          return;
+        }
+        root.className = "";
+        bots.forEach((bot) => {
+          const row = document.createElement("div");
+          row.className = "credential-row";
+          const left = document.createElement("div");
+          left.className = "credential-main";
+          const title = document.createElement("div");
+          title.className = "credential-title";
+          const name = document.createElement("strong");
+          name.textContent = bot.label;
+          title.append(
+            name,
+            badge(
+              bot.personaId
+                ? "answers as " + (slackBotAgentNames.get(bot.personaId) || bot.personaId)
+                : "default org agent",
+              "muted",
+            ),
+          );
+          const meta = document.createElement("div");
+          meta.className = "hint";
+          meta.textContent =
+            (bot.teamName || bot.teamId || "not yet connected") +
+            (bot.updatedBy ? " · by " + bot.updatedBy : "") +
+            (bot.updatedAt ? " · " + fmtTime(bot.updatedAt) : "");
+          const badges = document.createElement("div");
+          badges.className = "credential-badges";
+          badges.append(
+            badge(bot.enabled ? "Enabled" : "Disabled", bot.enabled ? "ok" : "muted"),
+            ...(bot.lastError ? [badge("Error", "err")] : []),
+          );
+          left.append(title, meta, badges);
+          if (bot.lastError) {
+            const err = document.createElement("div");
+            err.className = "flag-err";
+            err.textContent = bot.lastError + (bot.lastErrorAt ? " (" + fmtTime(bot.lastErrorAt) + ")" : "");
+            left.appendChild(err);
+          }
+          const actions = document.createElement("div");
+          actions.className = "credential-actions";
+          const toggle = document.createElement("label");
+          toggle.style.display = "flex";
+          toggle.style.alignItems = "center";
+          toggle.style.gap = "6px";
+          toggle.style.cursor = "pointer";
+          const checkbox = document.createElement("input");
+          checkbox.type = "checkbox";
+          checkbox.checked = bot.enabled;
+          checkbox.onchange = () => setSlackBotEnabled(bot, checkbox);
+          toggle.append(checkbox, document.createTextNode("Enabled"));
+          const del = document.createElement("button");
+          del.type = "button";
+          del.className = "rowbtn danger";
+          del.textContent = "Delete";
+          del.title = "Delete Slack bot";
+          del.setAttribute("aria-label", "Delete " + bot.label);
+          del.onclick = () => deleteSlackBot(bot);
+          actions.append(toggle, del);
+          row.append(left, actions);
+          root.appendChild(row);
+        });
+      }
+      async function setSlackBotEnabled(bot, checkbox) {
+        checkbox.disabled = true;
+        const r = await api("PUT", "/api/slack-bots/" + encodeURIComponent(bot.id), { enabled: checkbox.checked });
+        if (!r.ok) {
+          checkbox.checked = bot.enabled;
+          checkbox.disabled = false;
+          setStatus("st-slack-bots", r.data?.message || "Could not change that bot's enabled state.", "err", true);
+          return;
+        }
+        await loadSlackBots();
+        setStatus("st-slack-bots", checkbox.checked ? "Bot enabled." : "Bot disabled.", "ok");
+      }
+      async function deleteSlackBot(bot) {
+        if (!confirm('Delete the Slack bot "' + bot.label + '"? It will stop responding immediately.')) return;
+        const r = await api("DELETE", "/api/slack-bots/" + encodeURIComponent(bot.id));
+        if (!r.ok) {
+          setStatus("st-slack-bots", r.data?.message || "Delete failed.", "err");
+          return;
+        }
+        await loadSlackBots();
+        setStatus("st-slack-bots", "Deleted", "ok");
+      }
+      async function loadSlackBots() {
+        const [r] = await Promise.all([api("GET", "/api/slack-bots"), loadSlackBotAgents()]);
+        if (!r.ok) {
+          if (r.status === 404) {
+            $("card-slack-bots")?.classList.add("hidden");
+            return;
+          }
+          setStatus("st-slack-bots", r.data?.message || "Failed to load Slack bots.", "err");
+          return;
+        }
+        $("card-slack-bots")?.classList.remove("hidden");
+        if (r.data.createUrl) $("slack-bots-create").href = r.data.createUrl;
+        $("slack-bots-mode-hint").textContent =
+          r.data.unsupported ||
+          "Each bot connects over its own Socket Mode session, independent of the default bot above.";
+        $("slack-bots-mode-hint").classList.toggle("flag-err", Boolean(r.data.unsupported));
+        renderSlackBotsList(r.data.bots || []);
+      }
+      $("slack-bots-save").onclick = async () => {
+        const label = $("slack-bot-new-label").value.trim();
+        const botToken = $("slack-bot-new-token").value.trim();
+        const appToken = $("slack-bot-new-app-token").value.trim();
+        const personaId = $("slack-bot-new-persona").value.trim();
+        if (!label) {
+          setStatus("st-slack-bots", "Enter a label for this bot.", "err");
+          return;
+        }
+        if (!botToken || !appToken) {
+          setStatus("st-slack-bots", "Both Slack tokens are required.", "err");
+          return;
+        }
+        $("slack-bots-save").disabled = true;
+        setStatus("st-slack-bots", "Validating with Slack…", "saving", true);
+        const r = await api("POST", "/api/slack-bots", {
+          label,
+          botToken,
+          appToken,
+          ...(personaId ? { personaId } : {}),
+        });
+        $("slack-bots-save").disabled = false;
+        if (!r.ok) {
+          setStatus("st-slack-bots", r.data?.message || "Slack validation failed.", "err", true);
+          return;
+        }
+        $("slack-bot-new-label").value = "";
+        $("slack-bot-new-token").value = "";
+        $("slack-bot-new-app-token").value = "";
+        $("slack-bot-new-persona").value = "";
+        await loadSlackBots();
+        setStatus("st-slack-bots", "Saved. Slack bot is activating.", "ok");
+      };
+
       $("conn-reset").onclick = resetConnForm;
       async function deleteConn(provider) {
         if (
