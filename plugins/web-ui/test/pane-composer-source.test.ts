@@ -9,7 +9,10 @@ test("pane composer collapses to a single line — keyed off the pane, not a who
   assert.doesNotMatch(css, /\.embed-layout/, "panes are elements now, not framed documents");
   assert.match(css, /\[data-density\] \.composer-wrap \{[^}]*display: flex;/);
   assert.match(css, /\[data-density\] \.composer-toolbar \{\s*display: contents;/);
-  assert.match(css, /\[data-density\] \.composer-input \{[^}]*min-height: 0;/);
+  // `.composer-input-wrap` is the actual flex child now (it wraps the textarea and its
+  // `@mention` highlight backdrop, see composer.ts) — the shrink-to-fit `min-height: 0`
+  // that used to sit directly on `.composer-input` moved there with it.
+  assert.match(css, /\[data-density\] \.composer-input-wrap \{[^}]*min-height: 0;/);
   assert.match(composer, /Math\.max\(ctx\.pane \? 0 : 48, content\)/);
 });
 

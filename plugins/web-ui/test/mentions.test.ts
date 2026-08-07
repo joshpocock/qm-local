@@ -112,15 +112,16 @@ const rootFor = (markdown: string): HTMLElement => {
   return el;
 };
 
-test("chips a mention in prose, with the persona's colour, glyph and name", () => {
+test("chips a mention in prose, as a compact @Name pill carrying the roster's own name", () => {
   const root = rootFor("hey @Scout have a look");
   assert.equal(decorateMentions(root, ROSTER), 1);
   const chip = root.querySelector(".mention-chip");
   assert.ok(chip);
   assert.equal(chip.getAttribute("data-mention-id"), "ap_scout");
-  assert.match(chip.getAttribute("style") ?? "", /#2563eb/);
-  assert.equal(chip.querySelector(".persona-dot")?.textContent, "S");
-  assert.equal(chip.querySelector(".persona-name")?.textContent, "@Scout");
+  // Deliberately not the author badge's persona colour — see chipElement in mentions.ts.
+  assert.equal(chip.getAttribute("style"), null);
+  assert.equal(chip.querySelector(".persona-dot"), null);
+  assert.equal(chip.textContent, "@Scout");
   assert.equal(root.textContent?.includes("hey "), true);
 });
 
@@ -169,14 +170,21 @@ test("an empty roster paints nothing at all", () => {
   assert.equal(root.textContent?.trim(), "hey @Scout");
 });
 
-test("the viewer chips in a distinct neutral style", () => {
+test("a mention of the viewer carries its own warm-toned class, distinct from an agent mention", () => {
   const me: MentionTarget = { kind: "viewer", id: "", name: "josh" };
   const root = rootFor("thanks @josh");
   assert.equal(decorateMentions(root, [...ROSTER, me]), 1);
   const chip = root.querySelector(".mention-chip");
+  assert.ok(chip?.classList.contains("inline-mention"));
   assert.ok(chip?.classList.contains("mention-viewer"));
-  assert.ok(chip?.classList.contains("neutral"));
   assert.equal(chip?.getAttribute("data-mention-id"), null);
+  assert.equal(chip?.textContent, "@josh");
+});
+
+test("an agent mention never carries the viewer's warm-toned class", () => {
+  const root = rootFor("hey @Scout");
+  assert.equal(decorateMentions(root, ROSTER), 1);
+  assert.ok(!root.querySelector(".mention-chip")?.classList.contains("mention-viewer"));
 });
 
 // ---------------------------------------------------------------------------
@@ -233,9 +241,9 @@ test("a human message that says PASS is kept, and so is the live partial", () =>
 });
 
 test("dropped PASS replies do not count toward a thread's reply count", () => {
-  const before = groupRoomTranscript(TRANSCRIPT, { isRoom: true });
+  const before = groupRoomTranscript(TRANSCRIPT);
   assert.equal(before[0]?.replies.length, 4);
-  const after = groupRoomTranscript(dropRoomPassReplies(TRANSCRIPT, { isRoom: true, textOf }), { isRoom: true });
+  const after = groupRoomTranscript(dropRoomPassReplies(TRANSCRIPT, { isRoom: true, textOf }));
   assert.equal(after.length, 1);
   assert.equal(after[0]?.replies.length, 2);
 });

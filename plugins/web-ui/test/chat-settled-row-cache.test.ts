@@ -5,14 +5,23 @@ import test from "node:test";
 const chat = readFileSync(new URL("../src/chat.ts", import.meta.url), "utf8");
 
 test("the transcript renders rows through the settled-row cache", () => {
-  // Every row the transcript paints — a plain turn, a thread parent, a threaded reply —
-  // goes through the memo, so none of them may call chatMessage directly.
+  // Every row the transcript paints — a plain turn, a thread parent — goes through the
+  // memo, and so does every message the thread panel paints under the root.
   assert.match(chat, /out\.push\(settledChatMessage\(message, row\.index, message === streaming\)\)/);
-  assert.match(chat, /out\.push\(settledChatMessage\(message, row\.index, message === streaming, thread\)\)/);
   assert.match(
     chat,
-    /row\.replies\.map\(\(i\) => settledChatMessage\(messages\[i\]!, i, messages\[i\] === streaming\)\)/,
+    /out\.push\(settledChatMessage\(message, row\.index, message === streaming, threadSummary\(messages, row\)\)\)/,
   );
+  assert.match(
+    chat,
+    /open\.members\.map\(\(i\) => settledChatMessage\(messages\[i\]!, i, messages\[i\] === streaming\)\)/,
+  );
+});
+
+test("the thread panel's copy of the root deliberately bypasses the cache", () => {
+  // The root is the one message on screen twice, with an affordance in the transcript and
+  // without one in the panel. Memoising both would make each draw evict the other's entry.
+  assert.match(chat, /\$\{chatMessage\(root, open\.rootIndex, root === streaming\)\}/);
 });
 
 test("live or approval-paused rows bypass the cache (their render reads mutable state)", () => {

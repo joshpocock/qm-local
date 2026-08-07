@@ -248,7 +248,9 @@ function drawPopover(): void {
 function openMentionPopover(chip: HTMLElement): void {
   const kind = chip.getAttribute("data-mention-kind") === "viewer" ? "viewer" : "agent";
   const id = chip.getAttribute("data-mention-id") ?? "";
-  const name = (chip.querySelector(".persona-name")?.textContent ?? "").replace(/^@/, "");
+  // The chip is now just the compact `@Name` text itself (see `chipElement` in mentions.ts) —
+  // there is no nested `.persona-name` span to read it off of.
+  const name = (chip.textContent ?? "").replace(/^@/, "");
   if (!name) return;
   const cached = id ? cachedPersona(id) : undefined;
   popoverState.chip?.setAttribute("aria-expanded", "false");

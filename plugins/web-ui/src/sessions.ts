@@ -48,6 +48,7 @@ import {
   chatBrowseStatusMatches,
   bumpActivity,
   groupProjectSessions,
+  isPrivateSlackRow,
   isRoomSession,
   recencyGroup,
   recentProjectSeeds,
@@ -55,11 +56,18 @@ import {
   rowIndicators,
   splitPinned,
   splitRooms,
+  splitSlack,
+  surfaceOf,
   withPendingSession,
   withoutUnsentPending,
   type RecentItem,
   type ChatBrowseStatus,
 } from "./session-list";
+
+// Re-exported so existing callers (chat.ts, contexts.ts) keep importing it from "./sessions";
+// session-list.ts is the single source of truth to avoid an import cycle (sessions.ts already
+// imports from session-list.ts).
+export { surfaceOf };
 import { hideTooltip, showTooltip } from "./tooltip";
 import { errMessage } from "../../chassis/src/errors";
 import { copyText, fieldSelect, icon, relTime } from "./ui";
@@ -174,12 +182,6 @@ function listWhen(ms: number): string {
   return new Date(ms).toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
-export function surfaceOf(s: CoreSession): string {
-  if (s.threadRef.startsWith("web:")) return "web";
-  if (s.threadRef.startsWith("dm:") || s.threadRef.startsWith("ch:")) return "slack";
-  return "core";
-}
-
 export function sessionSlackUrl(s: Pick<CoreSession, "threadRef">): string | null {
   return slackThreadUrl(appState.me?.slackWorkspaceUrl ?? null, s.threadRef);
 }
@@ -256,7 +258,10 @@ export function slackLogo(size = 13): TemplateResult {
 
 function visibleSessions(): CoreSession[] {
   const sorted = [...sessionsState.list].sort((a, b) => activityOf(b) - activityOf(a));
-  return sessionsState.webOnly ? sorted.filter((s) => surfaceOf(s) === "web") : sorted;
+  if (!sessionsState.webOnly) return sorted;
+  // Slack has its own group in the sidebar now, so "Web only" no longer hides it — the
+  // toggle's job is narrowed to hiding the core/misc surface only.
+  return sorted.filter((s) => surfaceOf(s) === "web" || surfaceOf(s) === "slack");
 }
 
 export function renderList(): void {
@@ -267,7 +272,10 @@ export function renderList(): void {
   const { pinned, rest } = splitPinned(active);
   // Rooms are their own surface, so they come out before chats are grouped by project and
   // recency — a room never nests under a project heading.
-  const { rooms, rest: chats } = splitRooms(rest);
+  const { rooms, rest: afterRooms } = splitRooms(rest);
+  // Slack is its own surface too, with its own sidebar home — it never nests under a
+  // project heading or a date bucket, and it shows regardless of the "Web only" toggle.
+  const { slack, rest: chats } = splitSlack(afterRooms);
   const activeItems = recentItemsFor(chats);
   const archivedItems: RecentItem[] = archived.map((session) => ({ kind: "session", session }));
   armMidnightRefresh();
@@ -308,6 +316,18 @@ export function renderList(): void {
             `
           : nothing
       }
+      ${
+        slack.length
+          ? html`
+              <div class="recents-group slack-head">${slackLogo(11)}<span>Slack</span></div>
+              ${repeat(
+                slack,
+                (session) => session.threadRef,
+                (session) => sessionRow(session),
+              )}
+            `
+          : nothing
+      }
       ${groupedRows(activeItems)}
       ${
         archived.length
@@ -326,7 +346,7 @@ export function renderList(): void {
       ${
         !sessionsLoading && !sessionsNotice && visible.length === 0
           ? html`<div class="empty" style="padding:16px">
-              ${sessionsState.list.length ? "Slack conversations hidden." : "No conversations yet."}
+              ${sessionsState.list.length ? "Other conversations hidden." : "No conversations yet."}
             </div>`
           : ""
       }
@@ -784,6 +804,12 @@ function surfaceGlyph(s: CoreSession): TemplateResult | typeof nothing {
   return nothing;
 }
 
+/** The "Private" prefix on a Slack DM row (see `isPrivateSlackRow` for why only those). */
+function privateMark(s: CoreSession): TemplateResult | typeof nothing {
+  if (!isPrivateSlackRow(s)) return nothing;
+  return html`<span class="private-chip" title="Private conversation">${icon(Lock, 10)}<span>Private</span></span>`;
+}
+
 function rowContext(s: CoreSession): string | null {
   let label = sharedContextLabel(s.scopeId, s.channelName ?? null);
   if (surfaceOf(s) === "slack") label = s.type === "group" ? groupDmText(s.channelName) : channelLabel(s);
@@ -814,6 +840,7 @@ function sessionRow(s: CoreSession, projectChild = false): TemplateResult {
     title,
     room ? "room" : null,
     surface !== "web" ? surface : null,
+    isPrivateSlackRow(s) ? "private" : null,
     context,
     working ? "agent is working" : null,
     s.awaitingInput ? "waiting for your reply" : null,
@@ -843,7 +870,7 @@ function sessionRow(s: CoreSession, projectChild = false): TemplateResult {
         }}
       >
         <div class="title" aria-live="polite">
-          ${statusMarks(s)}${surfaceGlyph(s)}${roomRosterDots(s.room)}${readOnly ? html`<span class="ro-lock" title="Read-only">${icon(Lock, 12)}</span>` : nothing}<span
+          ${statusMarks(s)}${surfaceGlyph(s)}${privateMark(s)}${roomRosterDots(s.room)}${readOnly ? html`<span class="ro-lock" title="Read-only">${icon(Lock, 12)}</span>` : nothing}<span
             class="tl"
             >${titleContent}</span
           >${context ? html`<span class="row-context" title=${context}>${context}</span>` : nothing}

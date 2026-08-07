@@ -1,7 +1,7 @@
 import type { Agent, AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Attachment } from "@earendil-works/pi-web-ui";
 import { FolderDropError, folderToZipFile, isFolderReadError, splitDropItems, type DropEntryLike } from "./folder-drop";
-import { html, nothing, type TemplateResult } from "lit";
+import { html, nothing, render, type TemplateResult } from "lit";
 import { live } from "lit/directives/live.js";
 import {
   ArrowUp,
@@ -49,9 +49,22 @@ import { bumpSessionActivity, dropPendingSession, renderList } from "./sessions"
 import { adminSessionLogUrl, appState, can } from "./shell";
 import { base64ToText, bytesToBase64, insertIntoDraft, pasteChipLabel } from "./paste-text";
 import { clearDraft, newChatDraftKey, saveDraft } from "./drafts";
-import { clearRoomRefusal, isRoomThread, roomRefusalFor } from "./room-state";
+import { cachedAgents, cachedPersona, clearRoomRefusal, isRoomThread, roomFor, roomRefusalFor } from "./room-state";
+import { ensureRoomPersonas } from "./rooms";
+import { mentionSegments, viewerMentionName, type MentionTarget } from "./mentions";
 
 export type ComposerMenu = "effort" | "harness" | "model" | "settings";
+
+/** What a caller other than the composer's own form can vary about a send. */
+export interface SendOptions {
+  /**
+   * Text to send instead of the main composer's draft. Present exactly when the send came
+   * from somewhere with a draft of its own — today, the thread panel's composer.
+   */
+  text?: string;
+  /** The thread root's seq, when this send is a reply into that thread. */
+  replyToSeq?: number;
+}
 
 const LEGACY_MODEL_STORAGE_KEY = "web-ui:model";
 const THREAD_PICKS_STORAGE_KEY = "web-ui:model-picks";
@@ -183,6 +196,23 @@ export function slashQuery(draft: string): string | null {
   return m ? (m[2] ?? "") : null;
 }
 
+/**
+ * The `@mention` autocomplete token, structurally the same trick as `SLASH_TOKEN`: only the
+ * trailing run of the draft counts, so the popover follows whatever is being typed right now
+ * rather than any `@` earlier in the message. The character class deliberately includes a
+ * space — an agent name cannot contain one today (`AGENT_NAME_PATTERN`), but the query is
+ * filtered against the roster regardless of what it captures, so a name that later gains
+ * multi-word support costs nothing here. This is purely a typing aid: it has no bearing on
+ * `mentions.ts`'s `matchesAt`, which is the actual grammar a rendered `@Name` is checked
+ * against, and which this file must never touch.
+ */
+const MENTION_TOKEN = /(^|\s)@([A-Za-z0-9 ._-]*)$/;
+
+export function mentionQuery(draft: string): string | null {
+  const m = MENTION_TOKEN.exec(draft);
+  return m ? (m[2] ?? "") : null;
+}
+
 export function resyncModelSelection(): void {
   try {
     localStorage.removeItem(LEGACY_MODEL_STORAGE_KEY);
@@ -221,6 +251,7 @@ export function createComposerSurface(ctx: ConvCtx): ComposerSurface {
     dragging: false,
     openMenu: null as ComposerMenu | null,
     slashDismissed: false,
+    mentionDismissed: false,
     effortLevel: loadStoredEffort(defaultEffortForModel(modelOptionFor(defaultModelValue()).model)),
     fastMode: loadStoredFastMode(),
     pasteView: null as { id: string; text: string; initial: string; dirty: boolean } | null,
@@ -231,6 +262,13 @@ export function createComposerSurface(ctx: ConvCtx): ComposerSurface {
   let dragDepth = 0;
   let skillsLoading = false;
   let slashActiveIndex = 0;
+  let mentionActiveIndex = 0;
+  // Fire-and-forget: `ensureRoomPersonas()` memoises the `/api/agents` fetch, so this is a
+  // no-op after the first composer mounts. The autocomplete degrades gracefully if a keystroke
+  // races it — an empty candidate list just means the popover has nothing to show yet.
+  void ensureRoomPersonas().then(() => {
+    if (ctx.chat.state.agent) ctx.chat.drawActiveChat(ctx.chat.state.agent);
+  });
   let fastModeCharging = false;
   let orgFastModeDefault = false;
   let fastModeChargeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -249,6 +287,8 @@ export function createComposerSurface(ctx: ConvCtx): ComposerSurface {
     composerState.openMenu = null;
     slashActiveIndex = 0;
     composerState.slashDismissed = false;
+    mentionActiveIndex = 0;
+    composerState.mentionDismissed = false;
   }
 
   function scopeKey(): string | null {
@@ -392,7 +432,7 @@ export function createComposerSurface(ctx: ConvCtx): ComposerSurface {
     }
     return html`
       <form class="composer-wrap" @submit=${(e: Event) => submitComposer(e, agent)}>
-        ${slashMenu(agent)}
+        ${slashMenu(agent)} ${mentionMenu(agent)}
         ${
           activeRuntimeConfig?.upgradeAvailable
             ? html`<div class="runtime-upgrade">
@@ -456,16 +496,20 @@ export function createComposerSurface(ctx: ConvCtx): ComposerSurface {
           approvalPauses.length
             ? composerApprovalPanel(approvalPauses)
             : html`
-                <textarea
-                  class="composer-input"
-                  rows="1"
-                  placeholder=${placeholder}
-                  ?disabled=${inputBlocked}
-                  .value=${live(composerState.draft)}
-                  @input=${(e: InputEvent) => onDraftInput(e, agent)}
-                  @keydown=${(e: KeyboardEvent) => onComposerKeydown(e, agent)}
-                  @paste=${(e: ClipboardEvent) => void onComposerPaste(e, agent)}
-                ></textarea>
+                <div class="composer-input-wrap">
+                  ${mirrorHost(composerState.draft, mentionTargetsFor(ctx.chat.state.threadRef))}
+                  <textarea
+                    class="composer-input"
+                    rows="1"
+                    placeholder=${placeholder}
+                    ?disabled=${inputBlocked}
+                    .value=${live(composerState.draft)}
+                    @input=${(e: InputEvent) => onDraftInput(e, agent)}
+                    @keydown=${(e: KeyboardEvent) => onComposerKeydown(e, agent)}
+                    @paste=${(e: ClipboardEvent) => void onComposerPaste(e, agent)}
+                    @scroll=${onComposerScroll}
+                  ></textarea>
+                </div>
               `
         }
         <div class="composer-toolbar">
@@ -1056,6 +1100,206 @@ export function createComposerSurface(ctx: ConvCtx): ComposerSurface {
     return scope ? scope.charAt(0).toUpperCase() + scope.slice(1) : "";
   }
 
+  // ---------------------------------------------------------------------------
+  // @mention autocomplete
+  // ---------------------------------------------------------------------------
+
+  /** One nameable candidate, plus whether it is already in the mounted room (if any). */
+  interface MentionCandidate {
+    target: MentionTarget;
+    inRoom: boolean;
+  }
+
+  interface MentionMatch {
+    candidate: MentionCandidate;
+    start: number;
+    end: number;
+  }
+
+  /**
+   * Who `@` can complete to, in priority order: the room roster first (so the people
+   * already in the conversation sort to the top), then every other enabled agent the
+   * `/api/agents` cache knows about, then the viewer. Used by both the dropdown and the
+   * highlight overlay below, so a name lights up in the draft exactly when it is also an
+   * autocomplete candidate.
+   *
+   * Deliberately broader than `mentionTargetsForThread` (mention-markdown.ts), which is
+   * room-only because that is what core's mention grammar actually routes on. This list is
+   * just a typing aid — offering (and highlighting) a name here says nothing about whether
+   * core will treat it as a mention once sent.
+   */
+  function mentionCandidatesFor(threadRef: string | null): MentionCandidate[] {
+    const room = roomFor(threadRef);
+    const inRoomIds = new Set(room?.personaIds ?? []);
+    const seen = new Set<string>();
+    const out: MentionCandidate[] = [];
+    for (const id of room?.personaIds ?? []) {
+      const chip = cachedPersona(id);
+      if (!chip?.name || seen.has(id)) continue;
+      seen.add(id);
+      out.push({
+        target: {
+          kind: "agent",
+          id: chip.id,
+          name: chip.name,
+          ...(chip.color ? { color: chip.color } : {}),
+          ...(chip.glyph ? { glyph: chip.glyph } : {}),
+        },
+        inRoom: true,
+      });
+    }
+    for (const agent of cachedAgents()) {
+      if (!agent.enabled || seen.has(agent.id)) continue;
+      seen.add(agent.id);
+      out.push({
+        target: { kind: "agent", id: agent.id, name: agent.name, color: agent.color, glyph: agent.glyph },
+        inRoom: inRoomIds.has(agent.id),
+      });
+    }
+    const me = viewerMentionName(appState.me?.user);
+    if (me) out.push({ target: { kind: "viewer", id: "", name: me }, inRoom: true });
+    return out;
+  }
+
+  function mentionTargetsFor(threadRef: string | null): MentionTarget[] {
+    return mentionCandidatesFor(threadRef).map((c) => c.target);
+  }
+
+  function matchMentions(query: string, candidates: MentionCandidate[]): MentionMatch[] {
+    const q = query.toLowerCase();
+    if (!q) return candidates.map((candidate) => ({ candidate, start: -1, end: -1 }));
+    const out: MentionMatch[] = [];
+    for (const candidate of candidates) {
+      const at = candidate.target.name.toLowerCase().indexOf(q);
+      if (at >= 0) out.push({ candidate, start: at, end: at + q.length });
+    }
+    return out.sort((a, b) => a.start - b.start || a.candidate.target.name.localeCompare(b.candidate.target.name));
+  }
+
+  function currentMentionMenu(): { open: boolean; matches: MentionMatch[] } {
+    const query = mentionQuery(composerState.draft);
+    if (query === null || composerState.mentionDismissed) return { open: false, matches: [] };
+    const matches = matchMentions(query, mentionCandidatesFor(ctx.chat.state.threadRef));
+    return { open: matches.length > 0, matches };
+  }
+
+  function clampedMentionActive(matchCount: number): number {
+    return Math.max(0, Math.min(mentionActiveIndex, matchCount - 1));
+  }
+
+  function acceptMention(candidate: MentionCandidate, agent: Agent): void {
+    const name = candidate.target.name;
+    composerState.draft = composerState.draft.replace(MENTION_TOKEN, (_m, pre: string) => `${pre}@${name} `);
+    persistDraft();
+    mentionActiveIndex = 0;
+    composerState.mentionDismissed = false;
+    ctx.chat.drawActiveChat(agent);
+    focusComposerEnd();
+  }
+
+  function closeMentionMenu(agent: Agent): void {
+    composerState.mentionDismissed = true;
+    ctx.chat.drawActiveChat(agent);
+  }
+
+  function mentionDotStyle(target: MentionTarget): string {
+    return target.color ? `--persona-color: ${target.color};` : "";
+  }
+
+  function highlightMentionName(m: MentionMatch): TemplateResult {
+    const { name } = m.candidate.target;
+    if (m.start < 0 || m.end <= m.start) return html`${name}`;
+    return html`${name.slice(0, m.start)}<b>${name.slice(m.start, m.end)}</b>${name.slice(m.end)}`;
+  }
+
+  function mentionRow(m: MentionMatch, active: boolean, agent: Agent): TemplateResult {
+    const { target, inRoom } = m.candidate;
+    const showHint = target.kind === "agent" && roomThread() && !inRoom;
+    return html`
+      <button
+        type="button"
+        role="option"
+        aria-selected=${active ? "true" : "false"}
+        class="mention-option ${active ? "active" : ""}"
+        @mousedown=${(e: Event) => e.preventDefault()}
+        @click=${() => acceptMention(m.candidate, agent)}
+      >
+        <span class="persona-dot mention-option-dot" style=${mentionDotStyle(target)} aria-hidden="true">
+          ${target.glyph ?? target.name.slice(0, 1).toUpperCase()}
+        </span>
+        <span class="mention-option-name">${highlightMentionName(m)}</span>
+        ${showHint ? html`<span class="mention-option-hint">not in room — will be added</span>` : nothing}
+      </button>
+    `;
+  }
+
+  function mentionMenu(agent: Agent): TemplateResult | typeof nothing {
+    const mention = currentMentionMenu();
+    if (!mention.open) return nothing;
+    const active = clampedMentionActive(mention.matches.length);
+    return html`
+      <div class="mention-autocomplete" role="listbox" aria-label="Mention">
+        <div class="menu-title">Mention</div>
+        ${mention.matches.map((m, i) => mentionRow(m, i === active, agent))}
+      </div>
+    `;
+  }
+
+  // ---------------------------------------------------------------------------
+  // @mention highlighting — the mirror overlay behind the textarea
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The backdrop's content: the exact draft text, with recognised `@Name` tokens wrapped in
+   * a `<mark>` for its background highlight. The mirror's own text is transparent (see
+   * `.composer-mirror` in shell.css) — only the `<mark>` backgrounds are visible, sitting
+   * behind the real, fully opaque textarea text above it.
+   */
+  function mirrorTemplate(text: string, targets: MentionTarget[]): TemplateResult {
+    const segments = mentionSegments(text, targets);
+    return html`${segments.map((seg) =>
+      seg.target ? html`<mark class="composer-mention-hl">${seg.text}</mark>` : seg.text,
+    )}`;
+  }
+
+  /**
+   * The mirror element itself. It exists here, on ONE line, rather than inline in
+   * `composerForm`, because `.composer-mirror` is `white-space: pre-wrap` — it has to be, to
+   * wrap exactly where the textarea wraps — which makes it whitespace-SENSITIVE. Authored
+   * across lines, the newline and source indentation between the open tag and the content are
+   * real characters: they push every highlight down one line and right by the indent width.
+   * Nothing about a `<div>` tells a formatter that, hence the ignore.
+   */
+  // prettier-ignore
+  function mirrorHost(text: string, targets: MentionTarget[]): TemplateResult {
+    return html`<div class="composer-mirror" aria-hidden="true">${mirrorTemplate(text, targets)}</div>`;
+  }
+
+  /**
+   * Repaints just the mirror, imperatively — called from the per-keystroke fast path in
+   * `onDraftInput` that deliberately skips a full `drawActiveChat` re-render for typing
+   * latency. A full render (e.g. after `acceptMention`) already renders the mirror correctly
+   * from `composerState.draft` via `mirrorTemplate` in `composerForm`, so this only needs to
+   * cover the path that bypasses that render.
+   */
+  function syncComposerMirror(agent: Agent): void {
+    if (!ctx.chat.state.host || agent !== ctx.chat.state.agent) return;
+    const mirror = ctx.chat.state.host.querySelector<HTMLElement>(".composer-mirror");
+    const ta = ctx.chat.state.host.querySelector<HTMLTextAreaElement>(".composer-input");
+    if (!mirror || !ta) return;
+    render(mirrorTemplate(composerState.draft, mentionTargetsFor(ctx.chat.state.threadRef)), mirror);
+    mirror.scrollTop = ta.scrollTop;
+  }
+
+  /** Keeps the (non-scrollable) mirror's clipped window aligned with the real textarea's. */
+  function onComposerScroll(e: Event): void {
+    const ta = e.currentTarget as HTMLTextAreaElement;
+    const mirror = ta.previousElementSibling;
+    if (mirror instanceof HTMLElement && mirror.classList.contains("composer-mirror")) {
+      mirror.scrollTop = ta.scrollTop;
+    }
+  }
+
   function submitComposer(e: Event, agent: Agent): void {
     e.preventDefault();
     void sendPrompt(agent);
@@ -1068,15 +1312,19 @@ export function createComposerSurface(ctx: ConvCtx): ComposerSurface {
     composerState.error = "";
     composerState.slashDismissed = false;
     slashActiveIndex = 0;
-    const armed = slashQuery(composerState.draft) !== null;
-    if (armed && skillsCache === null && !skillsLoading) void loadSkills(agent);
-    const popoverShown = Boolean(ctx.chat.state.host?.querySelector(".slash-popover"));
-    if (armed || popoverShown || hadError) {
+    composerState.mentionDismissed = false;
+    mentionActiveIndex = 0;
+    const slashArmed = slashQuery(composerState.draft) !== null;
+    const mentionArmed = mentionQuery(composerState.draft) !== null;
+    if (slashArmed && skillsCache === null && !skillsLoading) void loadSkills(agent);
+    const popoverShown = Boolean(ctx.chat.state.host?.querySelector(".slash-popover, .mention-autocomplete"));
+    if (slashArmed || mentionArmed || popoverShown || hadError) {
       ctx.chat.drawActiveChat(agent);
       return;
     }
     syncComposerControls(agent);
     resizeComposer();
+    syncComposerMirror(agent);
   }
 
   function composerCanSend(): boolean {
@@ -1134,6 +1382,28 @@ export function createComposerSurface(ctx: ConvCtx): ComposerSurface {
       } else if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         return;
+      }
+    }
+    const mention = currentMentionMenu();
+    if (mention.open) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        return closeMentionMenu(agent);
+      }
+      const count = mention.matches.length;
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        mentionActiveIndex = (clampedMentionActive(count) + 1) % count;
+        return ctx.chat.drawActiveChat(agent);
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        mentionActiveIndex = (clampedMentionActive(count) - 1 + count) % count;
+        return ctx.chat.drawActiveChat(agent);
+      }
+      if (!e.shiftKey && (e.key === "Enter" || e.key === "Tab")) {
+        e.preventDefault();
+        return acceptMention(mention.matches[clampedMentionActive(count)]!.candidate, agent);
       }
     }
     if (e.key !== "Enter" || e.shiftKey) return;
@@ -1254,29 +1524,57 @@ export function createComposerSurface(ctx: ConvCtx): ComposerSurface {
     if (composerState.draft === text) void sendPrompt(agent);
   }
 
-  async function sendPrompt(agent: Agent): Promise<void> {
-    if (composerState.processingFiles) return;
+  /**
+   * One send path, two callers. `text` is what the thread panel hands in — it keeps its own
+   * draft, so writing into the composer first and sending that would be a detour through
+   * state the person can see change. `replyToSeq` is what makes the turn a reply into a
+   * thread rather than to the conversation.
+   */
+  async function sendPrompt(agent: Agent, opts: SendOptions = {}): Promise<void> {
+    // "Aside" = typed somewhere other than the main composer, so none of the composer's own
+    // state (draft, attachments, paste view, its DOM) is this send's to spend or clear.
+    const aside = typeof opts.text === "string";
+    if (!aside && composerState.processingFiles) return;
     if (!activeRuntimeConfig && !agent.state.isStreaming) return;
-    if (composerState.pasteView) closePasteView(agent);
+    if (!aside && composerState.pasteView) closePasteView(agent);
     if (ctx.chat.state.resolvingApprovals.size > 0) return;
     if (ctx.chat.hasUnresolvedApproval()) return;
-    if (agent.state.isStreaming) return sendSteer(agent);
-    const text = composerState.draft.trim();
-    if (!text && composerState.attachments.length === 0) return;
+    // Steering is the main composer's affordance over the running task. A thread reply is a
+    // message to a thread, not an interruption of whatever is streaming, so it waits.
+    if (agent.state.isStreaming) return aside ? undefined : sendSteer(agent);
+    const text = (aside ? opts.text! : composerState.draft).trim();
+    const attachments = aside ? [] : composerState.attachments;
+    if (!text && attachments.length === 0) return;
     if (ctx.chat.state.threadRef) {
       bumpSessionActivity(ctx.chat.state.threadRef);
       ctx.chat.state.pendingSend = ctx.chat.state.threadRef;
       renderList();
     }
-    const attachments = composerState.attachments;
     ctx.chat.notePendingSessionOnSend();
-    clearActiveDraft();
-    resetComposer();
+    if (!aside) {
+      clearActiveDraft();
+      resetComposer();
+    }
+    // Read back out by `currentTurnOptions()` when `drive()` builds the turn body, and
+    // cleared once this turn is over so nothing else inherits the thread.
+    ctx.chat.state.replyToSeq = opts.replyToSeq ?? null;
     ctx.chat.drawActiveChat(agent);
-    clearComposerDom(agent);
+    if (!aside) clearComposerDom(agent);
     try {
+      // The outgoing message carries the thread link itself, not just the request body, so
+      // the transcript folds it into the thread on the spot rather than after the refresh
+      // that ends the turn — the same `parentSeq` core will stamp on the entry it writes.
+      const link = typeof opts.replyToSeq === "number" ? { parentSeq: opts.replyToSeq } : {};
       if (attachments.length) {
-        await agent.prompt({ role: "user-with-attachments", content: text, attachments, timestamp: Date.now() });
+        await agent.prompt({
+          role: "user-with-attachments",
+          content: text,
+          attachments,
+          timestamp: Date.now(),
+          ...link,
+        });
+      } else if (typeof opts.replyToSeq === "number") {
+        await agent.prompt({ role: "user", content: text, timestamp: Date.now(), ...link } as AgentMessage);
       } else {
         await agent.prompt(text);
       }
@@ -1284,8 +1582,14 @@ export function createComposerSurface(ctx: ConvCtx): ComposerSurface {
       ctx.chat.state.pendingSend = null;
       if (ctx.chat.state.threadRef && ctx.chat.state.sessionId === null) dropPendingSession(ctx.chat.state.threadRef);
       renderList();
-      composerState.error = errMessage(err, "Could not send message.");
+      const message = errMessage(err, "Could not send message.");
+      // An aside owns its own error surface (and still holds the text the person typed), so
+      // it is told rather than having the failure land under a composer it did not use.
+      if (aside) throw new Error(message);
+      composerState.error = message;
       ctx.chat.drawActiveChat(agent);
+    } finally {
+      ctx.chat.state.replyToSeq = null;
     }
   }
 
@@ -1530,6 +1834,10 @@ export function createComposerSurface(ctx: ConvCtx): ComposerSurface {
       composerState.slashDismissed = true;
       changed = true;
     }
+    if (!composerState.mentionDismissed && mentionQuery(composerState.draft) !== null) {
+      composerState.mentionDismissed = true;
+      changed = true;
+    }
     return changed;
   }
 
@@ -1546,6 +1854,7 @@ export function createComposerSurface(ctx: ConvCtx): ComposerSurface {
     resetComposer,
     focusComposerEnd,
     resizeComposer,
+    sendPrompt,
     currentModelOption,
     carryModelPick,
     refreshRuntimeSelection,

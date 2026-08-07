@@ -467,7 +467,7 @@ test("a room's name survives an unnamed room: the roster is the default title ev
 test("rooms are lifted into their own sidebar section before chats are grouped", () => {
   const list = sessions.slice(sessions.indexOf("export function renderList"));
   const body = list.slice(0, list.indexOf("\n}\n"));
-  assert.match(body, /const \{ rooms, rest: chats \} = splitRooms\(rest\);/);
+  assert.match(body, /const \{ rooms, rest: afterRooms \} = splitRooms\(rest\);/);
   assert.ok(
     body.indexOf("splitRooms(rest)") < body.indexOf("recentItemsFor(chats)"),
     "a room must never nest under a project heading",

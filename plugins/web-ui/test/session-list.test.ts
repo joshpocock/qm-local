@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   activityOf,
   applySessionState,
@@ -7,8 +8,11 @@ import {
   chatBrowseStatusMatches,
   clearWorking,
   groupProjectSessions,
+  isPrivateSlackRow,
   isRoomSession,
   splitRooms,
+  splitSlack,
+  surfaceOf,
   backgroundLabel,
   conversationBackground,
   markWorking,
@@ -121,6 +125,59 @@ test("splitRooms lifts rooms out in order, exactly as splitPinned lifts pinned r
     splitRooms([a]).rest.map((s) => s.id),
     ["a"],
   );
+});
+
+test("surfaceOf classifies by threadRef prefix", () => {
+  assert.equal(surfaceOf({ threadRef: "web:u:a" }), "web");
+  assert.equal(surfaceOf({ threadRef: "dm:u:a" }), "slack");
+  assert.equal(surfaceOf({ threadRef: "ch:general:a" }), "slack");
+  assert.equal(surfaceOf({ threadRef: "core:u:a" }), "core");
+});
+
+test("splitSlack lifts Slack-surface rows out in order, exactly as splitRooms lifts rooms", () => {
+  const a = saved("a", "web:u:a");
+  const b = saved("b", "dm:u:b");
+  const c = saved("c", "web:u:c");
+  const d = saved("d", "ch:general:d");
+  const { slack, rest } = splitSlack([a, b, c, d]);
+  assert.deepEqual(
+    slack.map((s) => s.id),
+    ["b", "d"],
+    "slack rows keep their relative (recency) order",
+  );
+  assert.deepEqual(
+    rest.map((s) => s.id),
+    ["a", "c"],
+    "and the web/core chats they came from are otherwise untouched",
+  );
+  assert.deepEqual(splitSlack([]).slack, []);
+  assert.deepEqual(
+    splitSlack([a]).rest.map((s) => s.id),
+    ["a"],
+  );
+});
+
+test("isPrivateSlackRow: only a Slack DM or group DM is private", () => {
+  assert.equal(isPrivateSlackRow({ threadRef: "dm:u:b", type: "dm" }), true);
+  assert.equal(isPrivateSlackRow({ threadRef: "dm:u:b", type: "group" }), true);
+  assert.equal(isPrivateSlackRow({ threadRef: "ch:general:d", type: "channel" }), false, "#general says so itself");
+  // A web chat is private too, in the ordinary sense — but saying so on every row would
+  // make the word mean nothing where it matters.
+  assert.equal(isPrivateSlackRow({ threadRef: "web:u:a", type: "dm" }), false);
+  assert.equal(isPrivateSlackRow({ threadRef: "core:u:a", type: "group" }), false);
+});
+
+test("a Slack DM row wears the lock chip, and says 'private' to a screen reader", () => {
+  // sessions.ts renders through lit against the DOM, so its wiring is asserted on source.
+  const sessions = readFileSync(new URL("../src/sessions.ts", import.meta.url), "utf8");
+  const mark = sessions.slice(sessions.indexOf("function privateMark"));
+  const body = mark.slice(0, mark.indexOf("\n}\n"));
+  assert.match(body, /if \(!isPrivateSlackRow\(s\)\) return nothing;/, "one rule, shared with the list helper");
+  assert.match(body, /class="private-chip"/);
+  assert.match(body, /\$\{icon\(Lock, 10\)\}/, "reusing the Lock the read-only mark already imports");
+  assert.match(body, /<span>Private<\/span>/);
+  assert.match(sessions, /\$\{statusMarks\(s\)\}\$\{surfaceGlyph\(s\)\}\$\{privateMark\(s\)\}/, "prefixing the title");
+  assert.match(sessions, /isPrivateSlackRow\(s\) \? "private" : null,/, "and named in the row's aria-label");
 });
 
 test("a second New chat keeps the first pending row (both show in Recents)", () => {

@@ -283,8 +283,10 @@ export type AssistantWork = AssistantMessage & {
   /** Seq of the entry this reply was built from. Absent on a client-side partial. */
   seq?: number;
   /**
-   * `entry.parentSeq`, carried through so the transcript can thread a room. Outside rooms
-   * this is the ordinary linear `seq - 1` chain and means nothing — see `thread-group.ts`.
+   * `entry.parentSeq`, carried through so the transcript can thread a reply under the human
+   * turn it answered. Core stamps this at the triggering user entry in every session now
+   * (it used to be room-only); an older entry still carries the previous linear chain, which
+   * never resolves to a user row and so renders flat — see `thread-group.ts`.
    */
   parentSeq?: number | null;
 };
@@ -313,6 +315,16 @@ export interface TurnOptions {
   harness?: string;
   scopeId?: string | null;
   channelName?: string | null;
+  /**
+   * The seq of the thread this turn is a reply into — the root human turn, as the client
+   * knows it. Core re-validates and resolves it to the real root, so handing it the root
+   * already known here is enough; the entry core writes carries that root as its
+   * `parentSeq`, which is what folds the message and its answer into the thread.
+   *
+   * Absent on every ordinary turn, which is a reply to the conversation rather than into
+   * one thread of it.
+   */
+  replyToSeq?: number;
 }
 
 export interface ActiveRun {
@@ -643,6 +655,7 @@ async function drive(
         ...(timezone ? { timezone } : {}),
         ...(turnOptions.scopeId ? { scopeId: turnOptions.scopeId } : {}),
         ...(turnOptions.channelName ? { channelName: turnOptions.channelName } : {}),
+        ...(typeof turnOptions.replyToSeq === "number" ? { replyToSeq: turnOptions.replyToSeq } : {}),
         ...(attachments.length ? { attachments } : {}),
         ...(approval ? { approval } : {}),
         ...(opener ? { proactiveOpener: true } : {}),
@@ -1132,6 +1145,8 @@ interface HistoryUserMessage {
   steered?: boolean;
   /** Seq of the entry this turn was built from — what a room's replies point back at. */
   seq?: number;
+  /** The entry's stored parent — a thread reply's link to its root (see threadParentSeq). */
+  parentSeq?: number;
 }
 
 function postCallText(payload: unknown): string | null {
@@ -1292,6 +1307,9 @@ export function entriesToMessages(entries: SessionEntry[], model: Model<Api>): A
           timestamp: e.createdAt,
           ...(payload?.steered ? { steered: true } : {}),
           ...(typeof e.seq === "number" ? { seq: e.seq } : {}),
+          // A thread reply's link to its root. Without this, a threaded user entry loses its
+          // parentage on every transcript refresh and pops out of the thread as a new root.
+          ...(typeof e.parentSeq === "number" ? { parentSeq: e.parentSeq } : {}),
         };
         if (atts.length) {
           msg.attachments = atts.map((a, i) => ({
@@ -1326,8 +1344,26 @@ export function entriesToMessages(entries: SessionEntry[], model: Model<Api>): A
     } else if (e.type === "delivery") {
       appendDeliveryFiles(deliveredFilesFromAttachments(payload?.files));
     } else if (e.type === "system") {
-      const failure = e.payload as { kind?: string; message?: string } | null;
-      if (failure?.kind === "turn_failure" && typeof failure.message === "string" && failure.message) {
+      const failure = e.payload as { kind?: string; message?: string; text?: string } | null;
+      if (failure?.kind === "agent_room_join" && typeof failure.text === "string" && failure.text) {
+        // An `@tag` pulled agents into the room (core writes the note server-side, see
+        // `noteRoomJoin` in src/api/app-turn.ts). Rendered as a standalone muted line —
+        // `systemNote` short-circuits `settledChatMessage` before any bubble chrome.
+        spillHeldPosts();
+        flushWork("", e.createdAt);
+        const note: AssistantMessage = {
+          role: "assistant",
+          content: [{ type: "text", text: "" }],
+          api: model.api,
+          provider: model.provider,
+          model: model.id,
+          usage: zeroUsage(),
+          stopReason: "stop",
+          timestamp: e.createdAt,
+        };
+        (note as AgentMessage & { systemNote?: string }).systemNote = failure.text;
+        out.push(note as AgentMessage);
+      } else if (failure?.kind === "turn_failure" && typeof failure.message === "string" && failure.message) {
         spillHeldPosts();
         flushWork("", e.createdAt);
         const msg: AssistantMessage = {

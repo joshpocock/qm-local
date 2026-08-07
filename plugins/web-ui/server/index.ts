@@ -1562,6 +1562,7 @@ const routeRequest = async (req: IncomingMessage, res: ServerResponse) => {
       let proactiveOpener = false;
       let room: { personaIds: string[]; rounds: number } | undefined;
       let badRoom = false;
+      let replyToSeq: number | undefined;
       try {
         const p = JSON.parse(await readBody(req));
         text = String(p.text ?? "");
@@ -1583,6 +1584,13 @@ const routeRequest = async (req: IncomingMessage, res: ServerResponse) => {
         if (typeof p.thinkingLevel === "string") thinkingLevel = p.thinkingLevel;
         if (typeof p.fastMode === "boolean") fastMode = p.fastMode;
         if (typeof p.timezone === "string" && p.timezone.trim()) timezone = p.timezone.trim().slice(0, 64);
+        // Reply in thread: the seq of the message this one answers. Only the shape is checked
+        // here — whether that seq names a message anybody may reply to is core's call, and it
+        // refuses the turn with a reason the composer shows. A malformed one is dropped rather
+        // than refused: it can only come from a client bug, and the message itself is fine.
+        if (typeof p.replyToSeq === "number" && Number.isInteger(p.replyToSeq) && p.replyToSeq >= 0) {
+          replyToSeq = p.replyToSeq;
+        }
         // A roster on the first message of a brand-new room. Same normaliser the PUT route
         // uses; `null` is meaningless here (there is no roster to clear yet), so it is junk.
         if (p.room !== undefined) {
@@ -1647,6 +1655,7 @@ const routeRequest = async (req: IncomingMessage, res: ServerResponse) => {
         ...(approval ? { approval } : {}),
         ...(proactiveOpener ? { proactiveOpener: true } : {}),
         ...(room ? { room } : {}),
+        ...(replyToSeq !== undefined ? { replyToSeq } : {}),
       };
       return postTurnAndMint(res, turn, user, threadRef);
     }

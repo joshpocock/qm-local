@@ -681,21 +681,129 @@ test("a roster enlarged by a tag persists: the next untagged message runs the wh
   assert.deepEqual((await roomOf(built, session.id))!.personaIds, [...personas.map((p) => p.id), nomad.id]);
 });
 
-test("a conversation with no room is untouched by a message containing an @tag", async () => {
+/** The "X was added to the room" system entries among `entries`, as their text. */
+const joinNotes = (entries: readonly SessionEntry[]) =>
+  ofType(entries, "system")
+    .filter((e) => (e.payload as { kind?: unknown } | null)?.kind === "agent_room_join")
+    .map((e) => String((e.payload as { text?: string }).text ?? ""));
+
+test("an @tag in a conversation with no room promotes it to a room holding the tagged agent", async () => {
   const built = freshApp();
   const threadRef = "web:U1:join-plain";
   await built.app.turn(webTurn(threadRef, "hello"));
   const session = (await built.sessions.getByThread(threadRef))!;
-  await makePersona(built, "Nomad");
+  const nomad = await makePersona(built, "Nomad");
+  assert.equal(await roomOf(built, session.id), undefined, "an ordinary session to start with");
 
   const before = await lastSeq(built, session.id);
   const result = await built.app.turn(webTurn(threadRef, "@Nomad are you there?"));
   assert.notEqual(result.status, "refused", result.reason);
 
-  const assistants = ofType(await addedSince(built, session.id, before), "assistant");
-  assert.equal(assistants.length, 1, "one plain turn, not a panel");
-  assert.equal(personaOf(assistants[0]!), undefined, "and it is unattributed");
-  assert.equal(await roomOf(built, session.id), undefined, "a tag never conjures a room out of nothing");
+  assert.deepEqual(
+    await roomOf(built, session.id),
+    { personaIds: [nomad.id], rounds: 1 },
+    "the tag promoted the session to a room of exactly the agent it named",
+  );
+  const added = await addedSince(built, session.id, before);
+  assert.deepEqual(await spokeSince(built, session.id, before), ["Nomad"], "and Nomad answered the message itself");
+  assert.deepEqual(joinNotes(added), ["Nomad was added to the room"], "the join is visible in the transcript");
+});
+
+test("a promoted room outlives the message that made it, and a second tag adds to it rather than replacing it", async () => {
+  const built = freshApp();
+  const threadRef = "web:U1:join-promote-2";
+  await built.app.turn(webTurn(threadRef, "hello"));
+  const session = (await built.sessions.getByThread(threadRef))!;
+  const nomad = await makePersona(built, "Nomad");
+  const critic = await makePersona(built, "Critic");
+
+  assert.notEqual((await built.app.turn(webTurn(threadRef, "!think @Nomad take a look"))).status, "refused");
+  assert.deepEqual((await roomOf(built, session.id))!.personaIds, [nomad.id]);
+
+  const before = await lastSeq(built, session.id);
+  assert.notEqual((await built.app.turn(webTurn(threadRef, "!think @Critic you too"))).status, "refused");
+  assert.deepEqual(
+    (await roomOf(built, session.id))!.personaIds,
+    [nomad.id, critic.id],
+    "the second tag joined the room the first one made",
+  );
+  assert.deepEqual(joinNotes(await addedSince(built, session.id, before)), ["Critic was added to the room"]);
+});
+
+test("tagging two agents at once promotes the session to a room of both, noted in one line", async () => {
+  const built = freshApp();
+  const threadRef = "web:U1:join-promote-3";
+  await built.app.turn(webTurn(threadRef, "hello"));
+  const session = (await built.sessions.getByThread(threadRef))!;
+  const nomad = await makePersona(built, "Nomad");
+  const critic = await makePersona(built, "Critic");
+
+  const before = await lastSeq(built, session.id);
+  assert.notEqual((await built.app.turn(webTurn(threadRef, "!think @Nomad and @Critic, thoughts?"))).status, "refused");
+
+  assert.deepEqual((await roomOf(built, session.id))!.personaIds, [nomad.id, critic.id]);
+  assert.deepEqual(joinNotes(await addedSince(built, session.id, before)), ["Nomad and Critic were added to the room"]);
+});
+
+test("a tag naming nobody the actor can see still conjures no room", async () => {
+  const built = freshApp();
+  const threadRef = "web:U1:join-plain-2";
+  await built.app.turn(webTurn(threadRef, "hello"));
+  const session = (await built.sessions.getByThread(threadRef))!;
+
+  const dormant = await makePersona(built, "Dormant");
+  await built.personas.update(dormant.id, { enabled: false });
+  const filed = await makePersona(built, "Filed");
+  await built.personas.archive(filed.id);
+  // Another principal's personal scope: real, enabled, and none of U1's business.
+  await built.personas.create({
+    scopeId: "personal:U2",
+    name: "Hidden",
+    color: "#ba9926",
+    glyph: "HI",
+    harnessId: "mock",
+    modelId: "claude-opus-4-8",
+    instructions: "You are Hidden.",
+    createdBy: "U2",
+  });
+
+  for (const text of ["@Nobody are you there?", "@Dormant are you there?", "@Filed are you there?", "@Hidden hello"]) {
+    const before = await lastSeq(built, session.id);
+    const result = await built.app.turn(webTurn(threadRef, text));
+    assert.notEqual(result.status, "refused", result.reason);
+
+    assert.equal(await roomOf(built, session.id), undefined, `"${text}" names nobody visible, so there is no room`);
+    const added = await addedSince(built, session.id, before);
+    const assistants = ofType(added, "assistant");
+    assert.equal(assistants.length, 1, `"${text}" runs one plain turn, not a panel`);
+    assert.equal(personaOf(assistants[0]!), undefined, "and it is unattributed");
+    assert.deepEqual(joinNotes(added), [], "nobody joined, so nothing is announced");
+  }
+});
+
+test("with the flag off an @tag in a roomless conversation changes nothing at all", async () => {
+  const built = freshApp();
+  const threadRef = "web:U1:join-plain-off";
+  await built.app.turn(webTurn(threadRef, "hello"));
+  const session = (await built.sessions.getByThread(threadRef))!;
+  await makePersona(built, "Nomad");
+
+  const before = await lastSeq(built, session.id);
+  process.env.QM_AGENT_ROOMS = "0";
+  let result;
+  try {
+    result = await built.app.turn(webTurn(threadRef, "@Nomad are you there?"));
+  } finally {
+    process.env.QM_AGENT_ROOMS = "1";
+  }
+  assert.notEqual(result.status, "refused", result.reason);
+
+  assert.equal(await roomOf(built, session.id), undefined, "no room is conjured with the flag off");
+  const added = await addedSince(built, session.id, before);
+  const assistants = ofType(added, "assistant");
+  assert.equal(assistants.length, 1, "one plain turn");
+  assert.equal(personaOf(assistants[0]!), undefined, "unattributed, exactly as before the feature");
+  assert.deepEqual(joinNotes(added), [], "and nothing is announced");
 });
 
 test("a two-round room tells each persona turn where in the panel it is", async () => {
@@ -818,12 +926,12 @@ test("an @tagged single-agent message threads the same way", async () => {
   assert.equal(assistants[0]!.parentSeq, users[0]!.seq, "and its reply hangs off the human message");
 });
 
-test("a conversation with no room keeps the linear parent chain it has today", async () => {
+test("a conversation with no room threads its reply under the message that triggered it", async () => {
   const built = freshApp();
   const threadRef = "web:U1:thread-plain";
 
-  // Control: no room anywhere in this session. `!preamble` makes the mock harness emit a
-  // tool_call/tool_result pair before the reply, so the linear chain and a thread parent
+  // No room anywhere in this session. `!preamble` makes the mock harness emit a
+  // tool_call/tool_result pair before the reply, so the linear chain and the thread parent
   // are genuinely different numbers here.
   await built.app.turn(webTurn(threadRef, "hello"));
   const session = (await built.sessions.getByThread(threadRef))!;
@@ -835,14 +943,84 @@ test("a conversation with no room keeps the linear parent chain it has today", a
   const assistants = ofType(added, "assistant");
   assert.ok(assistants.length >= 1, "the plain turn still replies");
   assert.ok(ofType(added, "tool_call").length >= 1, "and it used a tool on the way");
-  for (const entry of added) {
-    assert.equal(entry.parentSeq, entry.seq - 1, `entry ${entry.seq} (${entry.type}) keeps the linear parent`);
-  }
-  assert.notEqual(
+  assert.equal(
     assistants.at(-1)!.parentSeq,
     user.seq,
-    "which is emphatically not the threaded parent a room would have stamped",
+    "the reply hangs off the human message, in a 1:1 chat exactly as in a room",
   );
+  assert.notEqual(assistants.at(-1)!.seq - 1, user.seq, "and that is not simply the linear parent");
+});
+
+test("only the reply threads: thinking, tool_call and tool_result keep the linear chain", async () => {
+  const built = freshApp();
+  const threadRef = "web:U1:thread-plain-linear";
+
+  await built.app.turn(webTurn(threadRef, "hello"));
+  const session = (await built.sessions.getByThread(threadRef))!;
+  const before = await lastSeq(built, session.id);
+  assert.notEqual((await built.app.turn(webTurn(threadRef, "!preamble looking now"))).status, "refused");
+
+  const added = await addedSince(built, session.id, before);
+  const working = added.filter((e) => e.type !== "assistant");
+  assert.ok(
+    working.some((e) => e.type === "tool_call") && working.some((e) => e.type === "tool_result"),
+    "the turn did tool work worth checking",
+  );
+  for (const entry of working) {
+    assert.equal(
+      entry.parentSeq,
+      entry.seq - 1,
+      `entry ${entry.seq} (${entry.type}) keeps the linear parent so the working order still reads`,
+    );
+  }
+});
+
+test("each turn threads under its own message; no reply is ever stapled to an earlier turn's", async () => {
+  // The guard against a turn with no message of its own (proactive, ambient) reaching back
+  // for an older `user` entry: outside a panel the parent can only ever be the entry THIS
+  // turn wrote, so a reply can never land on the previous turn's message.
+  const built = freshApp();
+  const threadRef = "web:U1:thread-plain-2";
+  await built.app.turn(webTurn(threadRef, "hello"));
+  const session = (await built.sessions.getByThread(threadRef))!;
+
+  const beforeFirst = await lastSeq(built, session.id);
+  assert.notEqual((await built.app.turn(webTurn(threadRef, "!think first question"))).status, "refused");
+  const first = await addedSince(built, session.id, beforeFirst);
+
+  const beforeSecond = await lastSeq(built, session.id);
+  assert.notEqual((await built.app.turn(webTurn(threadRef, "!think second question"))).status, "refused");
+  const second = await addedSince(built, session.id, beforeSecond);
+
+  const firstUser = ofType(first, "user")[0]!;
+  const secondUser = ofType(second, "user")[0]!;
+  assert.notEqual(firstUser.seq, secondUser.seq);
+  assert.equal(ofType(first, "assistant").at(-1)!.parentSeq, firstUser.seq);
+  assert.equal(
+    ofType(second, "assistant").at(-1)!.parentSeq,
+    secondUser.seq,
+    "the second reply threads under the second message, never under the first",
+  );
+});
+
+test("with the flag off a reply still threads under the message that triggered it", async () => {
+  // Threading is not part of the agent-rooms feature: it is how every session behaves.
+  const built = freshApp();
+  const threadRef = "web:U1:thread-plain-off";
+  await built.app.turn(webTurn(threadRef, "hello"));
+  const session = (await built.sessions.getByThread(threadRef))!;
+
+  const before = await lastSeq(built, session.id);
+  process.env.QM_AGENT_ROOMS = "0";
+  try {
+    assert.notEqual((await built.app.turn(webTurn(threadRef, "!preamble looking now"))).status, "refused");
+  } finally {
+    process.env.QM_AGENT_ROOMS = "1";
+  }
+
+  const added = await addedSince(built, session.id, before);
+  const user = ofType(added, "user")[0]!;
+  assert.equal(ofType(added, "assistant").at(-1)!.parentSeq, user.seq);
 });
 
 test("a room whose agents are all disabled falls back to a single ordinary turn", async () => {

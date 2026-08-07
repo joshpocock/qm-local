@@ -95,6 +95,15 @@ export function cachedAgent(id: string): AgentItem | undefined {
   return agentCache.get(id);
 }
 
+/**
+ * Every agent `/api/agents` has told the client about, in cache (insertion) order. Used by
+ * the composer's `@mention` autocomplete, which needs the whole roster of nameable agents —
+ * not just the ones already in the current room — rather than a single lookup by id.
+ */
+export function cachedAgents(): AgentItem[] {
+  return [...agentCache.values()];
+}
+
 export function clearPersonaCache(): void {
   personaCache.clear();
   agentCache.clear();

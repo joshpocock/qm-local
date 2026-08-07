@@ -170,22 +170,17 @@ function textNodesIn(root: Element): Text[] {
   return out;
 }
 
-/** The two-letter fallback when a target carries no glyph of its own. */
-function glyphFor(target: MentionTarget): string {
-  return target.glyph ?? target.name.slice(0, 1).toUpperCase();
-}
-
 /**
- * One chip. Built from the same `persona-chip`/`persona-dot` parts the author chips and
- * roster chips use, so a mention reads as the same family of label, plus `inline-mention`
- * for the sizing that only makes sense mid-sentence.
+ * One chip: a compact `@Name` pill, deliberately *not* built from the `persona-chip`/
+ * `persona-dot` parts an author badge uses (see `rooms.ts` `personaChip()`/
+ * `personaAuthorChip()`) and not carrying `--persona-color` — a mention names who was
+ * addressed, an author badge names who spoke, and the two must read as different kinds of
+ * label at a glance. Styling lives in `.mention-chip.inline-mention` / `.mention-viewer`
+ * in shell.css, keyed off `--mention-accent` rather than any per-agent colour.
  */
 function chipElement(doc: Document, target: MentionTarget, raw: string): HTMLElement {
   const chip = doc.createElement("span");
-  chip.className = `${MENTION_CHIP_CLASS} persona-chip inline-mention${target.color ? "" : " neutral"}${
-    target.kind === "viewer" ? " mention-viewer" : ""
-  }`;
-  if (target.color) chip.setAttribute("style", `--persona-color: ${target.color};`);
+  chip.className = `${MENTION_CHIP_CLASS} inline-mention${target.kind === "viewer" ? " mention-viewer" : ""}`;
   chip.setAttribute(RAW_ATTR, raw);
   chip.setAttribute("data-mention-kind", target.kind);
   if (target.id) chip.setAttribute("data-mention-id", target.id);
@@ -195,14 +190,7 @@ function chipElement(doc: Document, target: MentionTarget, raw: string): HTMLEle
     "title",
     target.kind === "viewer" ? `${target.name} — you` : `${target.name} — open this agent's details`,
   );
-  const dot = doc.createElement("span");
-  dot.className = "persona-dot";
-  dot.setAttribute("aria-hidden", "true");
-  dot.textContent = glyphFor(target);
-  const name = doc.createElement("span");
-  name.className = "persona-name";
-  name.textContent = `@${target.name}`;
-  chip.append(dot, name);
+  chip.textContent = `@${target.name}`;
   return chip;
 }
 

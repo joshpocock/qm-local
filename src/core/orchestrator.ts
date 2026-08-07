@@ -2294,21 +2294,37 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                   if (syntheticPrompt) payload.hidden = true;
                   return { ...tainted, payload };
                 })();
-                // In a panel turn the persona's reply threads under the human message that
-                // started the panel: the newest `user` entry in the session, which is either the
-                // one this very turn just wrote (round 1) or the one an earlier turn of the same
-                // panel wrote (every continuation). Only the final `assistant` entry threads —
-                // thinking / tool_call / tool_result keep the default linear parent, so a client
-                // that walks the chain still sees a persona's own working order. With no user
-                // entry anywhere (a proactive or ambient room turn) we leave the default alone.
-                const panelParentSeq =
-                  input.panel && stored.type === "assistant"
-                    ? (spine.turnUserEntrySeq ?? priorUserEntrySeq)
-                    : undefined;
+                // A reply threads under the message that triggered it, in every session — a
+                // room panel, a 1:1 web chat, a Slack thread alike — so a client can render
+                // "3 replies" under the message someone actually wrote. Only the final
+                // `assistant` entry threads: thinking / tool_call / tool_result keep the default
+                // linear parent, so a client that walks the chain still sees the working order.
+                //
+                // The parent is the user entry THIS turn wrote. A panel is the one exception
+                // that also looks backwards: its continuation turns write no user entry of their
+                // own, so they fall back to the newest user entry already in the log, which is
+                // exactly the human message that opened the panel — that is what puts every
+                // persona in the panel on one thread. Outside a panel there is deliberately no
+                // fallback: a turn nobody triggered (proactive, ambient, an approval resume that
+                // re-enters with no fresh message) has no message to hang off and stays linear.
+                //
+                // The turn's own `user` entry threads too, and only when the human replied in
+                // thread: `input.replyToSeq` is the THREAD ROOT `App.turn` resolved, so the chain
+                // reads root ← this message ← the reply to it. Only the FIRST user entry of the
+                // turn — a mid-turn steer writes one of its own, and that is a new message on the
+                // linear chain, not a second reply into the thread.
+                const threadParentSeq = ((): number | undefined => {
+                  if (stored.type === "user") {
+                    return spine.turnUserEntrySeq === undefined ? input.replyToSeq : undefined;
+                  }
+                  if (stored.type !== "assistant") return undefined;
+                  if (input.panel) return spine.turnUserEntrySeq ?? priorUserEntrySeq;
+                  return spine.turnUserEntrySeq;
+                })();
                 const appended = await withManagedRosterVersion(() =>
                   deps.sessions.append(
                     lease,
-                    panelParentSeq === undefined ? stored : { ...stored, parentSeq: panelParentSeq },
+                    threadParentSeq === undefined ? stored : { ...stored, parentSeq: threadParentSeq },
                   ),
                 );
                 emittedEntries.push(appended);
@@ -2964,7 +2980,15 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         if ((err instanceof NonRetryableTurnError || input.finalAttempt) && !input.cancel?.aborted) {
           if (failureUserPayload) {
             await deps.sessions
-              .append(lease, { type: "user", payload: failureUserPayload, scopeLabel: scopeId as ScopeId })
+              .append(lease, {
+                type: "user",
+                payload: failureUserPayload,
+                scopeLabel: scopeId as ScopeId,
+                // The message is back-filled because the turn died before persisting it, so it
+                // is still the turn's own first user entry — a reply in thread belongs in its
+                // thread whether or not anything ever answered it.
+                ...(input.replyToSeq !== undefined ? { parentSeq: input.replyToSeq } : {}),
+              })
               .catch(swallowAs("orchestrator: turn failure user back-fill", undefined));
           }
           const payload: TurnFailurePayload = { kind: "turn_failure", message: turnFailureMessage(err) };

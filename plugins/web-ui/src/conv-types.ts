@@ -4,7 +4,7 @@ import type { DensityTier } from "./density";
 import type { Attachment } from "@earendil-works/pi-web-ui";
 import type { ApprovalDecision, CoreSession, PendingApproval, entriesToMessages } from "./core-bridge";
 import type { EffortLevel, ModelOption } from "./model-options";
-import type { ComposerMenu } from "./composer";
+import type { ComposerMenu, SendOptions } from "./composer";
 
 interface PaneState {
   threadRef: string | null;
@@ -42,6 +42,12 @@ interface ChatState {
   rememberedScopeId: string | null;
   rememberedContextName: string | null;
   pendingSend: string | null;
+  /**
+   * The thread root the in-flight send is a reply into, or null for an ordinary turn. Set
+   * just before the prompt starts and cleared when it ends, because the turn body is built
+   * inside `drive()` — well after the send path has handed off to the agent.
+   */
+  replyToSeq: number | null;
   resolvingApprovals: Set<string>;
   transcriptAnchorSeq: number | null;
   earlierCount: number;
@@ -103,6 +109,7 @@ export interface ComposerSurface {
   resetComposer(): void;
   focusComposerEnd(): void;
   resizeComposer(): void;
+  sendPrompt(agent: Agent, opts?: SendOptions): Promise<void>;
   currentModelOption(): ModelOption;
   carryModelPick(fromThreadRef: string | null, toThreadRef: string): void;
   refreshRuntimeSelection(scopeId: string | null, agent?: Agent): Promise<void>;
