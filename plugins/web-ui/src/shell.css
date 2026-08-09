@@ -297,51 +297,6 @@ body.resizing-sidebar {
   justify-content: space-between;
   gap: 8px;
 }
-.web-only-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-  font: inherit;
-  letter-spacing: inherit;
-  text-transform: inherit;
-  opacity: 0.55;
-  transition: opacity 0.12s ease;
-}
-.web-only-toggle:hover {
-  opacity: 1;
-}
-.web-only-toggle.on {
-  opacity: 0.85;
-}
-.web-only-toggle .mini-switch {
-  position: relative;
-  width: 18px;
-  height: 10px;
-  border-radius: 5px;
-  background: color-mix(in srgb, var(--muted-foreground) 35%, transparent);
-  transition: background 0.12s ease;
-}
-.web-only-toggle.on .mini-switch {
-  background: color-mix(in srgb, var(--foreground) 60%, transparent);
-}
-.web-only-toggle .mini-knob {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--background);
-  transition: left 0.12s ease;
-}
-.web-only-toggle.on .mini-knob {
-  left: 10px;
-}
 
 .sidebar .list {
   flex: 1;
@@ -688,6 +643,17 @@ body.resizing-sidebar {
 .recents-group.slack-head svg {
   flex: 0 0 auto;
   opacity: 0.8;
+}
+
+/* A Slack channel heading borrows the project group's markup wholesale, but it has no
+   options menu — so its thread count is an ordinary inline chip rather than the absolutely
+   positioned one that cross-fades with a project's "…" button on hover. */
+.recent-project.slack-channel .recent-project-head .recent-project-count,
+.recent-project.slack-channel .recent-project-head:hover .recent-project-count {
+  position: static;
+  inset: auto;
+  padding-right: 7px;
+  opacity: 1;
 }
 
 .session-row.colored .session {
@@ -4379,7 +4345,6 @@ body.resizing-sidebar {
   .nav-section-toggle,
   .recent-project-toggle,
   .session,
-  .web-only-toggle,
   .session-menu-option,
   .archived-toggle {
     min-height: 44px;
@@ -5601,6 +5566,78 @@ body.resizing-sidebar {
   margin: 6px auto 0;
   display: flex;
   flex-direction: column;
+}
+/* Splits a list-page's rows into named groups (e.g. Rooms ahead of Chats) — headed like the
+   sidebar's Pinned/Rooms/Slack groups so the two surfaces read as one visual language. */
+.list-section-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 14px 12px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+.list-rows > .list-section-head:first-child {
+  padding-top: 4px;
+}
+.list-section-head svg {
+  flex: 0 0 auto;
+  opacity: 0.8;
+}
+/* A channel heading inside the Chats page's Slack section — the `list-row` idiom's answer to
+   the sidebar's `.recent-project.slack-channel`: same data, same collapse behavior, laid out
+   for the wider pane instead of the narrow rail. */
+.chat-slack-channel-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.chat-slack-channel-head:hover,
+.chat-slack-channel-head:focus-visible {
+  background: var(--secondary);
+}
+.chat-slack-channel-head > svg {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+}
+.chat-slack-channel-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+.chat-slack-channel-count {
+  margin-left: auto;
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+}
+.chat-slack-channel-children {
+  display: flex;
+  flex-direction: column;
+  margin: 0 12px 6px 24px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+}
+.chat-slack-channel-children[hidden] {
+  display: none;
+}
+.chat-slack-channel-children .chat-row {
+  padding: 10px 12px;
 }
 .list-row {
   display: flex;
@@ -7220,6 +7257,32 @@ h3.ambient-field-label {
  * different questions ("who was addressed" vs. "who spoke") and must never look alike.
  * No dot glyph, no `--persona-color` — just the compact `@Name` text.
  */
+/* "answers as this agent in Slack" — see `slackBindingChip` in agents.ts. Sits inline after the
+   agent's own @name, so it borrows the muted palette rather than competing with it. */
+.agent-slack-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 8px;
+  padding: 1px 8px 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted-foreground) 10%, transparent);
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 500;
+  vertical-align: middle;
+}
+/* The default bot's debate persona is a narrower claim than a dedicated bot, and reads as one. */
+.agent-slack-chip.panel {
+  background: transparent;
+  border: 1px dashed color-mix(in srgb, var(--muted-foreground) 35%, transparent);
+}
+.agent-slack-scope {
+  padding-left: 5px;
+  border-left: 1px solid color-mix(in srgb, var(--muted-foreground) 30%, transparent);
+  font-size: 11px;
+  opacity: 0.85;
+}
 .mention-chip.inline-mention {
   display: inline;
   padding: 0.5px 5px;

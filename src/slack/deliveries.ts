@@ -23,6 +23,9 @@ import type { Delivery } from "../types.ts";
 import type { CoreBridge } from "./core-bridge.ts";
 import type { Mirror } from "./mirror.ts";
 import { cleanAgentReplyForSlack, stripSlackDirectives } from "./messaging.ts";
+import { personaIdFromIdentity } from "../delivery/persona-identity.ts";
+import { personaBotForId, registeredPersonaBots } from "./message-gating.ts";
+import { translateOutboundMentions } from "./panel-mentions.ts";
 
 const DELIVERY_CLAIM_MS = 15_000;
 
@@ -71,8 +74,17 @@ export function createDeliveryPoller(deps: {
   async function deliverToConversations(client: any): Promise<void> {
     for (const d of [...(await fetchDeliveries("slack")), ...(await fetchDeliveries("group"))]) {
       const runId = d.idempotencyKey?.startsWith("run:") ? d.idempotencyKey.slice("run:".length) : undefined;
-      if (runId && inFlightRuns.has(runId)) continue;
-      if (runId && typeof d.createdAt === "number" && Date.now() - d.createdAt < RUN_RECOVERY_GRACE_MS) continue;
+      // A panel CONTINUATION reply is the one delivery nobody is holding: the surface submitted
+      // one turn and owns only the first persona's reply, while the driver runs the rest in the
+      // background. There is no inline post to lose a race with and no handler that will ever
+      // ack it, so it skips both the in-flight pin and the recovery grace — the grace exists to
+      // let an owning handler post first, and this reply has no owner. Waiting it out would put
+      // a minute between one persona's turn and the next.
+      const panelAuthorId = personaIdFromIdentity(d.destination.identity);
+      if (!panelAuthorId) {
+        if (runId && inFlightRuns.has(runId)) continue;
+        if (runId && typeof d.createdAt === "number" && Date.now() - d.createdAt < RUN_RECOVERY_GRACE_MS) continue;
+      }
       let slackApiMs: number | undefined;
       await deliverWithRetry({
         tracker: deliveryTracker,
@@ -102,7 +114,15 @@ export function createDeliveryPoller(deps: {
               }
               return undefined;
             }
-            const text = toSlackMrkdwn(runId ? cleanAgentReplyForSlack(d.text).text : stripSlackDirectives(d.text));
+            const body = runId ? cleanAgentReplyForSlack(d.text).text : stripSlackDirectives(d.text);
+            // `@Critic` becomes a real Slack pill when Critic is a persona bot running here,
+            // which is what makes a panel read as a conversation rather than as plain text.
+            // The speaker's own name is left alone (see `translateOutboundMentions`).
+            const text = toSlackMrkdwn(
+              panelAuthorId
+                ? translateOutboundMentions(body, registeredPersonaBots(), personaBotForId(panelAuthorId)?.personaName)
+                : body,
+            );
             const replayAttachments = async (root?: string): Promise<void> => {
               if (!d.attachments?.length) return;
               try {
@@ -208,7 +228,11 @@ export function createDeliveryPoller(deps: {
             );
             const root = threadTs ?? (res?.ts ? String(res.ts) : undefined);
             if (root) threads.mark(channel, root, true);
-            if (!d.destination.identity) mirrorSelfPost(channel, res?.ts, text, { sub: threadTs });
+            // A post made under a hardcoded surface identity is somebody else's message and is
+            // not mirrored. A panel reply IS this deployment's own message — posted under a
+            // persona's bot rather than the default one — so it is mirrored exactly as an
+            // untagged reply would have been.
+            if (!d.destination.identity || panelAuthorId) mirrorSelfPost(channel, res?.ts, text, { sub: threadTs });
             await replayAttachments(root);
             return undefined;
           } finally {

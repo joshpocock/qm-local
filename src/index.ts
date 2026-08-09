@@ -4,6 +4,7 @@ import {
   configuredModelForHarness,
   loadConfig,
   providerKeysPresent,
+  resolveSlackPanelRounds,
 } from "./config.ts";
 import { buildApp, stopWithBackstop } from "./wiring.ts";
 import { createServer } from "./api/server.ts";
@@ -138,7 +139,26 @@ async function desiredSlackInstances(): Promise<Array<DesiredSlackInstance<Slack
       SLACK_BOT_TOKEN: stored.botToken,
       SLACK_APP_TOKEN: stored.appToken,
     });
-    if (dynamic) wanted.push({ key: "default", version: stored.version, config: dynamic });
+    if (dynamic) {
+      // Panel-only: the default bot keeps answering as the org's default agent on every turn of
+      // its own, and puts this persona on solely to take a seat in a room panel. Rides the same
+      // agent-rooms gate as a registry bot's persona, because it is the same machinery.
+      const panelPersona = stored.panelPersonaId && agentRoomsEnabled() ? stored.panelPersonaId : undefined;
+      if (stored.panelPersonaId && !agentRoomsEnabled()) {
+        console.warn(
+          "[qm] the default Slack bot has a debate agent but QM_AGENT_ROOMS is off — it will not join room panels",
+        );
+      }
+      // Rounds: the admin setting beats QM_SLACK_PANEL_ROUNDS beats 1. Changing it in the admin
+      // UI bumps `stored.version`, so the reconciler below restarts this instance on its next
+      // poll (5s) and the new number is live without a redeploy.
+      const panelRounds = resolveSlackPanelRounds(stored.panelRounds, process.env);
+      wanted.push({
+        key: "default",
+        version: stored.version,
+        config: { ...dynamic, panelRounds, ...(panelPersona ? { panelPersonaId: panelPersona } : {}) },
+      });
+    }
   } else if (!status.managed && slackConfig) {
     wanted.push({ key: "default", version: "environment", config: slackConfig });
   }
@@ -185,6 +205,11 @@ async function desiredSlackInstances(): Promise<Array<DesiredSlackInstance<Slack
         ...config,
         secondary: true,
         instanceLabel: bot.label,
+        // The same debate ceiling the default bot resolves. Without this a multi-bot panel
+        // driven by an elected persona bot fell back to the turn handler's `?? 1`, so debates
+        // stopped after one round no matter what the admin set — the bots even labelled their
+        // replies "1/4" from reading the human's text, while the driver cut them off at 1.
+        panelRounds: resolveSlackPanelRounds(stored?.panelRounds, process.env),
         ...(bot.personaId && agentRoomsEnabled() ? { personaId: bot.personaId } : {}),
       },
     });
@@ -224,7 +249,7 @@ process.on("SIGTERM", () => shutdown("SIGTERM"));
 
 /**
  * Node's default for an unhandled rejection is to kill the process, which is the wrong trade
- * for this one: core is the whole platform â€” every agent turn, cron, session and deployment â€”
+ * for this one: core is the whole platform — every agent turn, cron, session and deployment —
  * and a surface plugin is one optional integration hanging off the side of it. A Slack app
  * whose token was rotated in the Slack admin UI should cost the org Slack, not the platform.
  *
@@ -243,7 +268,7 @@ process.on("unhandledRejection", (reason: unknown) => {
   const detail = reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
   const data = (reason as { data?: unknown } | null)?.data;
   console.error(
-    `[qm] unhandled rejection (core kept running â€” this is a bug worth fixing):\n${detail}` +
+    `[qm] unhandled rejection (core kept running — this is a bug worth fixing):\n${detail}` +
       (data ? `\ndetail: ${JSON.stringify(data)}` : ""),
   );
 });

@@ -100,6 +100,7 @@ import { applyPendingRoom, ensureRoomPersonas, personaAuthorChip, personaDotStac
 import {
   defaultRoomNameFor,
   isRoomThread,
+  noteRoom,
   personaChipFor,
   personaRowKey,
   roomFor,
@@ -745,6 +746,12 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
 
     resetThreadFolds();
     resetBackgroundPanel();
+    // The chips resolve their roster through `roomFor(threadRef)`, which reads the applied-room
+    // store rather than this session object. The sessions refresh normally fills it, but the
+    // read-only pane can be mounted from a deep link before that lands — and this session is
+    // the same payload the refresh would have noted, so note it here and never depend on
+    // having been beaten to it.
+    noteRoom(s.threadRef, s.room ?? null);
     const host = document.createElement("div");
     host.className = "custom-chat readonly-chat";
     const draw = () =>
@@ -772,7 +779,12 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
             </div>
             ${backgroundActivityStrip()}
             <section class="chat-scroll readonly-scroll">
-              <div class="message-stack">
+              <!-- data-mention-thread (MENTION_THREAD_ATTR) names the thread a chip resolves
+                   its roster from. The read-only pane clears chatState.threadRef before it
+                   draws (see the note on chatHeader), so this reads the session's own ref —
+                   without it a mirrored Slack room's @agent text stays flat while the very
+                   same roster paints as chips in the header above it. -->
+              <div class="message-stack" data-mention-thread=${s.threadRef}>
                 ${
                   earlierCount > 0
                     ? html`<div class="earlier-messages">
@@ -825,6 +837,16 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     draw();
     container.replaceChildren(host);
     readOnlyView = { id: s.id, threadRef: s.threadRef, session: s, anchorSeq };
+    // Repaints mention chips on a stack that is already on screen. The per-block `updated()`
+    // hook covers the blocks that just rendered; this covers a roster that changed value
+    // under them — which is the normal case after a reload, since the persona cache is cold.
+    syncMentionTargets(host);
+    if (isRoomThread(s.threadRef)) {
+      void ensureRoomPersonas().then(() => {
+        if (readOnlyView?.id !== s.id) return;
+        syncMentionTargets(host);
+      });
+    }
     ctx.ensureDeliveryStream();
     consumeBackgroundPanelRequest();
   }

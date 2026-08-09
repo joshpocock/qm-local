@@ -20,6 +20,20 @@ import {
   type AgentItem,
 } from "./agent-registry";
 import { cachePersonas } from "./room-state";
+import { slackLogo } from "./sessions";
+
+/**
+ * One agent's Slack binding, as core's `/v1/slack-bindings` reports it. `bot` means a Slack bot
+ * answers as this agent on every message; `panel` means the default bot speaks as it inside a
+ * debate and as the ordinary org agent everywhere else. Never carries a token.
+ */
+interface SlackBinding {
+  personaId: string;
+  label: string;
+  botHandle?: string;
+  teamName?: string;
+  kind: "bot" | "panel";
+}
 
 interface AgentDraft {
   id: string | null;
@@ -36,6 +50,8 @@ interface AgentDraft {
 }
 
 let agentRows: AgentItem[] = [];
+/** personaId -> its Slack binding. Empty whenever Slack is unconfigured, or the read failed. */
+let slackBindings = new Map<string, SlackBinding>();
 let agentsNotice = "";
 let agentSearch = "";
 let scopeFilter = "all";
@@ -264,12 +280,33 @@ async function performArchive(a: AgentItem): Promise<void> {
 // Rendering
 // ---------------------------------------------------------------------------
 
+/**
+ * The Slack chip on an agent that answers as a bot. A dedicated bot shows the handle it posts
+ * under, because that is what someone types in Slack to reach this agent. The default bot's
+ * debate persona says so in as many words — it is the same handle people already DM for
+ * ordinary help, and the binding only applies inside a panel.
+ */
+function slackBindingChip(a: AgentItem): TemplateResult | typeof nothing {
+  const binding = slackBindings.get(a.id);
+  if (!binding) return nothing;
+  // The handle is captured from Slack when the bot's tokens are saved; a bot stored before that
+  // has none yet, so fall back to the label its operator gave it.
+  const name = binding.botHandle ? `@${binding.botHandle}` : binding.label;
+  const title =
+    binding.kind === "panel"
+      ? `${name} speaks as this agent in Slack debates, and as the default agent everywhere else`
+      : `${name} answers as this agent in Slack${binding.teamName ? ` (${binding.teamName})` : ""}`;
+  return html`<span class="agent-slack-chip ${binding.kind === "panel" ? "panel" : ""}" title=${title}>
+    ${slackLogo(11)}<span>${name}</span>${binding.kind === "panel" ? html`<span class="agent-slack-scope">debates</span>` : nothing}
+  </span>`;
+}
+
 function agentRow(a: AgentItem): TemplateResult {
   return html`
     <div class="skill-variant agent-row ${a.enabled ? "" : "archived"}">
       <span class="persona-dot" style=${`--persona-color: ${a.color};`}>${a.glyph}</span>
       <div class="skill-variant-copy">
-        <div class="skill-variant-description" title=${`@${a.name}`}>@${a.name}</div>
+        <div class="skill-variant-description" title=${`@${a.name}`}>@${a.name}${slackBindingChip(a)}</div>
         <div class="skill-variant-meta">${agentMeta(a)}</div>
         <details class="skill-variant-details">
           <summary>Instructions</summary>
@@ -724,14 +761,25 @@ export async function renderAgents(): Promise<void> {
   }
 
   try {
-    const [r, contexts] = await Promise.all([
+    const [r, contexts, bindings] = await Promise.all([
       api<{ agents: AgentItem[] }>("/api/agents"),
       api<{ contexts?: CoreContext[] }>("/api/contexts").catch(() => ({ contexts: [] })),
+      // Decoration, not content: a deployment with no Slack at all answers with an empty list,
+      // and a failed read leaves the badges off rather than the page broken.
+      api<{ bindings?: SlackBinding[] }>("/api/slack-bindings").catch(() => ({ bindings: [] })),
     ]);
     if (request !== refreshSeq || seq !== appState.viewRenderSeq || appState.currentView !== "agents") return;
     roomsDisabled = false;
     agentRows = (r.agents ?? []).slice().sort((a, b) => a.name.localeCompare(b.name));
     cachePersonas(agentRows);
+    // A dedicated bot outranks the default bot's debate persona when an agent somehow has both:
+    // "answers as this agent everywhere" is the more consequential fact of the two.
+    slackBindings = new Map(
+      (bindings.bindings ?? [])
+        .slice()
+        .sort((a, b) => (a.kind === b.kind ? 0 : a.kind === "panel" ? -1 : 1))
+        .map((b) => [b.personaId, b] as const),
+    );
     createScopes = [
       { scopeId: personal, name: "Personal — only you" },
       ...(contexts.contexts ?? [])

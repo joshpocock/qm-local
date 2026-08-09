@@ -1120,6 +1120,7 @@ export function buildApp(
     runs,
     turnStream,
     tasks,
+    personas,
     ackPicks: ackEmojiPicks,
     ackModelId: () => auxiliaryModelForProvider("anthropic"),
     ...(config.brandingDefault ? { brandingDefault: config.brandingDefault } : {}),

@@ -23,6 +23,52 @@ export function threadHasBotStake(
 }
 
 /**
+ * The Slack Web API a sibling instance lends out so another instance can post AS its bot. Kept
+ * to the calls the delivery and reply paths actually make (`postWithVerify` needs
+ * `conversations.history`/`replies` to find a post it may have already made) so a whole Bolt
+ * `App` never crosses the seam — only the token-bound web client.
+ */
+export interface SlackPostClient {
+  chat: {
+    postMessage(args: Record<string, unknown>): Promise<unknown>;
+    update(args: Record<string, unknown>): Promise<unknown>;
+  };
+  conversations: {
+    history(args: Record<string, unknown>): Promise<unknown>;
+    replies(args: Record<string, unknown>): Promise<unknown>;
+  };
+}
+
+/** One running plugin instance, as its siblings see it. */
+export interface SlackBotIdentity {
+  botUserId?: string;
+  ownBotId?: string;
+  /**
+   * The persona this bot speaks as WHEN IN A PANEL (see docs/slack-multi-bot.md). Set both by a
+   * registry bot, which also speaks as it on every solo turn, and by the default bot carrying a
+   * PANEL persona, which does not — read `alwaysPersona` to tell the two apart. Everything that
+   * builds a panel roster wants this field either way, which is why they share it.
+   */
+  personaId?: string;
+  /** The persona's `@Name` token, resolved once at startup; absent means "not persona-bound". */
+  personaName?: string;
+  /**
+   * True when EVERY turn this bot takes runs as `personaId` (a registry bot). False when the
+   * persona is panel-only: the bot is the org's neutral default assistant on its own — same
+   * harness, model and header as before — and puts on the persona solely to take a seat in a
+   * room panel. Absent when there is no persona at all.
+   *
+   * Nothing in the panel path reads it: mention scanning and roster building deliberately count
+   * any record with a persona. It exists so a reader of this directory (and a diagnostic log)
+   * cannot mistake "has a persona" for "is persona-bound on every turn" — the solo-turn choice
+   * itself is made upstream, by whether the turn handler was given a `personaId` at all.
+   */
+  alwaysPersona?: boolean;
+  /** Posts under THIS bot's token. Absent in tests that only care about the gate. */
+  postClient?: SlackPostClient;
+}
+
+/**
  * Slack identities belonging to OTHER qm bots in this process (multi-bot deployments, see
  * docs/slack-multi-bot.md). A thread reply from a third-party bot — GitHub, PagerDuty — is real
  * input and still dispatches; a reply from a sibling qm bot is not, and left alone it would loop:
@@ -30,26 +76,125 @@ export function threadHasBotStake(
  *
  * Empty with a single bot beyond that bot's own ids, which `shouldProcessMessage` already
  * excluded, so nothing about single-bot behaviour changes.
+ *
+ * The same directory is what makes Slack room panels possible: it is the only place that knows
+ * which Slack user id belongs to which agent persona, and which client can post as it.
  */
+const siblingBots = new Set<SlackBotIdentity>();
 const siblingBotIds = new Set<string>();
 
-/** Registers one running plugin instance's identity; the returned function deregisters it. */
-export function registerSlackBotIdentity(ids: { botUserId?: string; ownBotId?: string }): () => void {
-  const added: string[] = [];
-  for (const id of [ids.botUserId, ids.ownBotId]) {
-    if (id && !siblingBotIds.has(id)) {
-      siblingBotIds.add(id);
-      added.push(id);
-    }
+function reindexSiblings(): void {
+  siblingBotIds.clear();
+  for (const bot of siblingBots) {
+    if (bot.botUserId) siblingBotIds.add(bot.botUserId);
+    if (bot.ownBotId) siblingBotIds.add(bot.ownBotId);
   }
+}
+
+/** Registers one running plugin instance's identity; the returned function deregisters it. */
+export function registerSlackBotIdentity(ids: SlackBotIdentity): () => void {
+  const record: SlackBotIdentity = { ...ids };
+  siblingBots.add(record);
+  reindexSiblings();
+  let released = false;
   return () => {
-    for (const id of added) siblingBotIds.delete(id);
+    if (released) return;
+    released = true;
+    siblingBots.delete(record);
+    reindexSiblings();
   };
 }
 
 /** Test seam. */
 export function registeredSlackBotIdentities(): ReadonlySet<string> {
   return siblingBotIds;
+}
+
+/** Every registered instance that speaks as a persona, in registration order. */
+export function registeredPersonaBots(): SlackBotIdentity[] {
+  return [...siblingBots].filter((bot) => !!bot.personaId && !!bot.personaName);
+}
+
+/** The instance that speaks as `personaId`, or undefined when it is not running here. */
+export function personaBotForId(personaId: string | undefined): SlackBotIdentity | undefined {
+  if (!personaId) return undefined;
+  for (const bot of siblingBots) if (bot.personaId === personaId) return bot;
+  return undefined;
+}
+
+/** The instance whose Slack user id is `botUserId`, persona-bound or not. */
+export function personaBotForUserId(botUserId: string | undefined): SlackBotIdentity | undefined {
+  if (!botUserId) return undefined;
+  for (const bot of siblingBots) if (bot.botUserId === botUserId) return bot;
+  return undefined;
+}
+
+/** `<@U…>` / `<@U…|label>` — Slack's mention encoding, as it arrives on the wire. */
+export const SLACK_MENTION_RE = /<@(\w+)(?:\|[^>]*)?>/g;
+
+/**
+ * The persona-bound bots a message `@mentioned`, in the order the mentions appear and without
+ * repeats. Mentions of humans, of third-party bots and of the persona-less default qm bot all
+ * match nothing, which is what keeps the default bot out of every panel roster.
+ */
+export function mentionedPersonaBots(text: string): SlackBotIdentity[] {
+  if (!text.includes("<@")) return [];
+  const out: SlackBotIdentity[] = [];
+  const seen = new Set<string>();
+  for (const match of text.matchAll(SLACK_MENTION_RE)) {
+    const bot = personaBotForUserId(match[1]);
+    if (!bot?.personaId || !bot.personaName || seen.has(bot.personaId)) continue;
+    seen.add(bot.personaId);
+    out.push(bot);
+  }
+  return out;
+}
+
+/**
+ * True when the text `@mentions` a qm bot running in this process that is NOT `selfBotUserId`.
+ *
+ * A message addressed to a sibling is SPOKEN FOR: that bot received the same event and is
+ * answering it (or deliberately PASSing). Every other instance must stand down — otherwise the
+ * org's neutral default bot, whose ambient path judges any message it was not itself tagged in,
+ * answers a question somebody asked a specific agent by name.
+ *
+ * Compares against the whole sibling id index (`botUserId` and `ownBotId` alike), not just the
+ * persona-bound entries, so a second default-style bot counts too. Empty in a single-bot
+ * deployment, where the only registered ids are this bot's own.
+ */
+export function mentionsSiblingBot(text: string, selfBotUserId?: string): boolean {
+  if (!text.includes("<@")) return false;
+  for (const match of text.matchAll(SLACK_MENTION_RE)) {
+    const id = match[1];
+    if (!id || id === selfBotUserId) continue;
+    if (siblingBotIds.has(id)) return true;
+  }
+  return false;
+}
+
+/**
+ * A Slack message that addresses two or more persona bots must run ONE panel, but every one of
+ * those bots receives the message and would otherwise start its own. The claim is first-caller-
+ * wins on `<channel>:<ts>` and lives in this process because every instance lives in this
+ * process; entries are swept on the next call rather than on a timer, so nothing has to be
+ * stopped.
+ */
+const PANEL_CLAIM_TTL_MS = 5 * 60_000;
+const panelClaims = new Map<string, number>();
+
+export function claimSlackPanel(channel: string, ts: string, opts: { now?: number; ttlMs?: number } = {}): boolean {
+  const now = opts.now ?? Date.now();
+  const ttlMs = opts.ttlMs ?? PANEL_CLAIM_TTL_MS;
+  for (const [key, at] of panelClaims) if (now - at >= ttlMs) panelClaims.delete(key);
+  const key = `${channel}:${ts}`;
+  if (panelClaims.has(key)) return false;
+  panelClaims.set(key, now);
+  return true;
+}
+
+/** Test seam. */
+export function resetSlackPanelClaims(): void {
+  panelClaims.clear();
 }
 
 export function shouldProcessMessage(

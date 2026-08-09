@@ -32,6 +32,7 @@ import { parseBotLedger, type BotPolicy } from "../../surface-cache/channel-poli
 import { isoFromTs } from "../../util/message-tag.ts";
 import { errMessage } from "../../util/errors.ts";
 import { orgId } from "../../config.ts";
+import { PANEL_PASS, isPanelPass } from "../../agents/panel-driver.ts";
 import { headLooksLikeText, replaceThreadSegment } from "./turn-helpers.ts";
 import type { OrchestratorDeps, OrchestratorInput } from "./types.ts";
 
@@ -197,6 +198,14 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
   };
   return {
     post: async (postText, opts, files) => {
+      // PASS is the panel driver's private signal for "I have nothing to add", never a
+      // message. A spine-routed panel turn is told to answer with this tool, so without this
+      // the word itself lands in the room. Recorded as a stay-silent so the addressed-turn
+      // nudge does not then ask for a post that must not exist.
+      if (input.panel && isPanelPass(postText)) {
+        spine.staySilentReason = `panel ${PANEL_PASS}`;
+        return { ok: true, message: "[staying silent]" };
+      }
       let destination = currentDestination;
       if (opts?.ts && destination.type !== "principal") {
         destination = { ...destination, target: replaceThreadSegment(destination.target, opts.ts) };

@@ -8,8 +8,11 @@ import {
   chatBrowseStatusMatches,
   clearWorking,
   groupProjectSessions,
+  groupSlackChannels,
+  isPrivateSlackChannel,
   isPrivateSlackRow,
   isRoomSession,
+  slackChannelIdOf,
   splitRooms,
   splitSlack,
   surfaceOf,
@@ -24,7 +27,7 @@ import {
   withPendingSession,
   withoutUnsentPending,
 } from "../src/session-list.ts";
-import type { CoreSession } from "../src/core-bridge.ts";
+import type { CoreContext, CoreSession } from "../src/core-bridge.ts";
 
 function pending(threadRef: string): CoreSession {
   return {
@@ -127,6 +130,115 @@ test("splitRooms lifts rooms out in order, exactly as splitPinned lifts pinned r
   );
 });
 
+test("splitRooms never lifts a Slack room: it has one home, under its channel", () => {
+  const webRoom = { ...saved("w", "web:u:w"), room: { personaIds: ["ap_1"], rounds: 1 } };
+  const slackThreadRoom = { ...saved("t", "ch:C1:1.1"), room: { personaIds: ["ap_1", "ap_2"], rounds: 2 } };
+  const slackDmRoom = { ...saved("d", "dm:D1"), room: { personaIds: ["ap_1"], rounds: 1 } };
+  const { rooms, rest } = splitRooms([webRoom, slackThreadRoom, slackDmRoom]);
+  assert.deepEqual(
+    rooms.map((s) => s.id),
+    ["w"],
+    "only the web room is lifted",
+  );
+  assert.deepEqual(
+    rest.map((s) => s.id),
+    ["t", "d"],
+    "the Slack rooms fall through to splitSlack, which files them under Slack — five debate threads in one channel must not also appear as five rows under Rooms",
+  );
+  // The two splits together must place every row exactly once.
+  const { slack } = splitSlack(rest);
+  assert.deepEqual(
+    slack.map((s) => s.id),
+    ["t", "d"],
+  );
+});
+
+test("slackChannelIdOf reads the channel out of a thread ref, and only out of a thread ref", () => {
+  assert.equal(slackChannelIdOf("ch:C0GENERAL:1712345678.000100"), "C0GENERAL");
+  assert.equal(slackChannelIdOf("ch:C0GENERAL"), "C0GENERAL", "a channel ref with no root ts is still that channel");
+  assert.equal(slackChannelIdOf("dm:D0PRIVATE"), null, "a DM is not a channel");
+  assert.equal(slackChannelIdOf("web:u:a"), null);
+  assert.equal(slackChannelIdOf("core:u:a"), null);
+  assert.equal(slackChannelIdOf("ch::1712345678.000100"), null, "a ref with no channel id groups nothing");
+});
+
+function slackThread(id: string, channelId: string, ts: string, at: number, channelName: string | null): CoreSession {
+  return {
+    ...saved(id, `ch:${channelId}:${ts}`),
+    type: "channel",
+    channelName,
+    lastActivityAt: at,
+  };
+}
+
+test("groupSlackChannels nests threads under their channel, newest channel and newest thread first", () => {
+  // Deliberately shuffled on the way in: grouping must impose the order, not inherit it.
+  const items = groupSlackChannels([
+    slackThread("g1", "C0GEN", "1.1", 10, "general"),
+    slackThread("r2", "C0RND", "2.2", 40, "#random"),
+    slackThread("g3", "C0GEN", "1.3", 30, "general"),
+    slackThread("r1", "C0RND", "2.1", 20, "#random"),
+    slackThread("g2", "C0GEN", "1.2", 50, "general"),
+  ]);
+  assert.deepEqual(
+    items.map((item) => (item.kind === "channel" ? `#${item.name}` : item.session.id)),
+    ["#general", "#random"],
+    "two channels, each once — #general leads because its newest thread (50) beats #random's (40)",
+  );
+  const [general, random] = items as Array<Extract<(typeof items)[number], { kind: "channel" }>>;
+  assert.deepEqual(
+    general.sessions.map((s) => s.id),
+    ["g2", "g3", "g1"],
+    "children are newest-first within the channel",
+  );
+  assert.deepEqual(
+    random.sessions.map((s) => s.id),
+    ["r2", "r1"],
+  );
+  assert.equal(general.channelId, "C0GEN");
+  assert.equal(random.name, "random", "the stored name is bare; the '#' is the heading's to draw");
+});
+
+test("groupSlackChannels leaves DMs flat, interleaved with channels by recency", () => {
+  const dm = { ...saved("dm1", "dm:D0BOSS"), lastActivityAt: 35 };
+  const items = groupSlackChannels([
+    slackThread("g1", "C0GEN", "1.1", 50, "general"),
+    dm,
+    slackThread("r1", "C0RND", "2.1", 20, "random"),
+  ]);
+  assert.deepEqual(
+    items.map((item) => (item.kind === "channel" ? `channel:${item.name}` : `session:${item.session.id}`)),
+    ["channel:general", "session:dm1", "channel:random"],
+    "a DM keeps its own top-level row and its place in the recency order",
+  );
+  const flat = items.find((item) => item.kind === "session");
+  assert.equal(flat?.kind === "session" && flat.session, dm, "and it is the very same session object, untouched");
+});
+
+test("groupSlackChannels: one thread still gets a channel heading, and an empty list gets nothing", () => {
+  // A lone thread is grouped too: the heading is what says which channel it is, and a second
+  // thread arriving must not reshuffle the row it is already sitting in.
+  const items = groupSlackChannels([slackThread("g1", "C0GEN", "1.1", 10, "general")]);
+  assert.equal(items.length, 1);
+  assert.equal(items[0]!.kind, "channel");
+  assert.deepEqual(groupSlackChannels([]), []);
+});
+
+test("groupSlackChannels falls back to the bare channel id when no thread knows the name", () => {
+  const items = groupSlackChannels([
+    slackThread("g1", "C0GEN", "1.1", 10, null),
+    slackThread("g2", "C0GEN", "1.2", 20, "  "),
+  ]);
+  assert.equal(items.length, 1);
+  assert.equal(items[0]!.kind === "channel" && items[0]!.name, null, "null name, so the heading shows the id");
+  // A later thread that does know the name is enough for the whole group.
+  const named = groupSlackChannels([
+    slackThread("g1", "C0GEN", "1.1", 10, "general"),
+    slackThread("g2", "C0GEN", "1.2", 20, null),
+  ]);
+  assert.equal(named[0]!.kind === "channel" && named[0]!.name, "general");
+});
+
 test("surfaceOf classifies by threadRef prefix", () => {
   assert.equal(surfaceOf({ threadRef: "web:u:a" }), "web");
   assert.equal(surfaceOf({ threadRef: "dm:u:a" }), "slack");
@@ -165,6 +277,34 @@ test("isPrivateSlackRow: only a Slack DM or group DM is private", () => {
   // make the word mean nothing where it matters.
   assert.equal(isPrivateSlackRow({ threadRef: "web:u:a", type: "dm" }), false);
   assert.equal(isPrivateSlackRow({ threadRef: "core:u:a", type: "group" }), false);
+});
+
+function context(scopeId: string, isPrivate?: boolean): CoreContext {
+  return {
+    scopeId,
+    kind: "channel",
+    name: null,
+    sessionCount: 0,
+    lastActivityAt: null,
+    ...(isPrivate !== undefined ? { isPrivate } : {}),
+  };
+}
+
+test("isPrivateSlackChannel: joins the channel id out of a threadRef against its /api/contexts scope", () => {
+  const contexts = [context("channel:C0GEN", true), context("channel:C0RND", false), context("channel:C0NOFLAG")];
+  assert.equal(isPrivateSlackChannel("C0GEN", contexts), true, "isPrivate:true on the matching scope locks the heading");
+  assert.equal(isPrivateSlackChannel("C0RND", contexts), false, "isPrivate:false is an explicit public channel");
+  assert.equal(
+    isPrivateSlackChannel("C0NOFLAG", contexts),
+    false,
+    "a matching scope with isPrivate absent reads as not private, not as unknown-but-locked",
+  );
+  assert.equal(isPrivateSlackChannel("C0GEN", []), false, "contexts not loaded yet -> no chip, not a false positive");
+  assert.equal(
+    isPrivateSlackChannel("C0MISSING", contexts),
+    false,
+    "a channel id with no matching scope (id mismatch) -> no chip",
+  );
 });
 
 test("a Slack DM row wears the lock chip, and says 'private' to a screen reader", () => {

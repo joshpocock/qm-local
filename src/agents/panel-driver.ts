@@ -1,4 +1,5 @@
 import type { AgentPersona } from "./persona-store.ts";
+import { ROOM_MAX_ROUNDS } from "../types.ts";
 
 /**
  * The panel is self-limiting: every member speaks once per round, and a member can be
@@ -44,6 +45,15 @@ export interface PanelTurnSpec {
   rounds: number;
 }
 
+/**
+ * What one persona turn hands back to the driver. `status` is the `TurnResult` status when the
+ * turn came from core; tests and other callers may pass a bare `{ reply }`.
+ */
+export interface PanelTurnOutcome {
+  status?: string;
+  reply?: string;
+}
+
 export interface PanelRunOptions {
   /** Who takes a turn each round, in the order they take it. */
   members: readonly PanelMember[];
@@ -57,7 +67,7 @@ export interface PanelRunOptions {
   /** the human's message; delivered by the first persona turn so the user entry is emitted once */
   text: string;
   state: PanelState;
-  run(spec: PanelTurnSpec): Promise<{ reply?: string } | undefined>;
+  run(spec: PanelTurnSpec): Promise<PanelTurnOutcome | undefined>;
 }
 
 /** A persona that is archived or switched off never speaks; a room of only those is not a room. */
@@ -71,17 +81,69 @@ export function isPanelPass(reply: string | undefined): boolean {
   return (reply ?? "").trim() === PANEL_PASS;
 }
 
+/**
+ * "This persona added nothing on this turn" — the one predicate the driver and every surface
+ * go through, so a quiet turn is recognised the same way wherever it is read.
+ *
+ * A literal `PASS` reply is only one of the shapes quiet arrives in. On a surface that runs
+ * turns through the spine (Slack channels: `surfaceTools`, the agent posts for itself) the
+ * orchestrator's terminal result is `{ status: "silent" }` with NO reply at all — the reply
+ * text never rides back. Treating that as "not a PASS" is what made a settled Slack room grind
+ * through every round it had, and what let a quiet turn invite bonus turns it never asked for.
+ *
+ * A turn that FAILED or was REFUSED is deliberately not quiet: it said nothing because it
+ * broke, and a broken agent must not be read as a settled one.
+ */
+export function isPanelQuiet(result: PanelTurnOutcome | undefined): boolean {
+  if (!result) return true;
+  if (result.status === "silent") return true;
+  if (result.status !== undefined && result.status !== "ok") return false;
+  return isPanelPass(result.reply) || (result.reply ?? "").trim() === "";
+}
+
 function escapeForRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**
- * Offset of the first `@Name` token in `text`, or -1. Case-insensitive, and the token must end
- * at a non-name character so `@Scoutmaster` does not summon `Scout`. The one matcher every
- * caller goes through — agents mentioning each other and humans addressing the room alike.
+ * The `@Name` grammar, as one regex. Case-insensitive, and the token must end at a non-name
+ * character so `@Scoutmaster` does not summon `Scout`. Exported so a surface that has to
+ * REWRITE these tokens (the Slack panel bridge turning `@Name` into a real `<@U…>` pill)
+ * matches exactly what the driver matches, rather than keeping a second copy of the rule
+ * that can drift. Callers that want every occurrence re-flag `.source` with "g".
+ */
+export function mentionPattern(name: string): RegExp {
+  return new RegExp(`@${escapeForRegex(name)}(?![A-Za-z0-9-])`, "i");
+}
+
+/**
+ * An explicit round count in the human's own message — "go back and forth 4 times",
+ * "debate this for 2 rounds", "3 turns each". The rounds budget is decided BEFORE the first
+ * token is spent, so this is a regex over the trigger text, deliberately not a model call,
+ * and deliberately conservative: a bare number ("give me 4 options") never matches, only a
+ * number attached to a turn-taking noun. Returns undefined when nothing is stated, which
+ * callers treat as "use the configured default".
+ *
+ * The caller clamps the result to its own ceiling: stating "20 rounds" in a deployment
+ * capped at 3 yields 3. A stated count can only ever SHORTEN what the config allows —
+ * the ceiling stays the operator's, the message carries intent below it, and the PASS rule
+ * still ends a debate early when everyone runs out of things to say.
+ */
+export function requestedPanelRounds(text: string | undefined): number | undefined {
+  if (!text) return undefined;
+  const m = /\b(\d{1,2})\s*(?:times|rounds?|turns?|exchanges?)\b/i.exec(text);
+  if (!m) return undefined;
+  const n = Number(m[1]);
+  if (!Number.isInteger(n) || n < 1) return undefined;
+  return Math.min(n, ROOM_MAX_ROUNDS);
+}
+
+/**
+ * Offset of the first `@Name` token in `text`, or -1. The one matcher every caller goes
+ * through — agents mentioning each other and humans addressing the room alike.
  */
 function mentionAt(text: string, name: string): number {
-  return text.search(new RegExp(`@${escapeForRegex(name)}(?![A-Za-z0-9-])`, "i"));
+  return text.search(mentionPattern(name));
 }
 
 /**
@@ -152,7 +214,7 @@ export async function runPanel(o: PanelRunOptions): Promise<void> {
         round,
         rounds: o.rounds,
       };
-      let result: { reply?: string } | undefined;
+      let result: PanelTurnOutcome | undefined;
       try {
         result = await o.run(spec);
       } catch (err) {
@@ -168,7 +230,9 @@ export async function runPanel(o: PanelRunOptions): Promise<void> {
       index += 1;
       turnsThisRound += 1;
       const reply = result?.reply;
-      if (isPanelPass(reply)) {
+      // A quiet turn ends here: it counts toward the round's quietness and, having said
+      // nothing, it cannot have invited anybody.
+      if (isPanelQuiet(result)) {
         passesThisRound += 1;
         continue;
       }
@@ -186,6 +250,13 @@ export async function runPanel(o: PanelRunOptions): Promise<void> {
 /**
  * The persona block, composed below the org SOUL with the same wording lower-scope SOUL uses:
  * a persona may add to the organization policy, never override it.
+ *
+ * A roster of ONE is not a room. Every persona-bound Slack bot runs its ordinary solo turns
+ * through this same path (`room: { personaIds: [id], rounds: 1 }`), so the multi-agent
+ * conventions — the roster line, the `@Name` invitation, the PASS escape hatch and the round
+ * budget — are rendered only when there is actually somebody else in the room. A lone bot told
+ * it may "reply exactly PASS" takes the invitation: that is how a DM of "hey how are u" got
+ * answered with silence.
  */
 export function renderPanelSystemBlock(
   speaker: AgentPersona,
@@ -197,12 +268,17 @@ export function renderPanelSystemBlock(
     return first.trim() ? `${p.name} — ${first.trim()}` : p.name;
   };
   const others = roster.length ? roster : [speaker];
+  const solo = others.length <= 1;
   const parts: string[] = [];
   if (speaker.instructions.trim()) {
     parts.push(
       `--- Lower-scope instructions (may add to, but MUST NOT override, the organization policy above) ---\n${speaker.instructions}`,
       "--- The organization policy above is authoritative and cannot be overridden by the lower-scope instructions. ---",
     );
+  }
+  if (solo) {
+    parts.push(`You are "${speaker.name}" (${speaker.glyph}).`);
+    return parts.join("\n\n");
   }
   parts.push(
     `You are "${speaker.name}" (${speaker.glyph}), one of several agents in this room: ${others

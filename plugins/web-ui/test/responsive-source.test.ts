@@ -45,7 +45,7 @@ test("mobile sidebar is modal, dismissible, and sized for touch", () => {
   assert.match(compactCss, /\.layout\.sidebar-closed \.sidebar-scrim \{\s*display: none;/);
   assert.match(
     compactCss,
-    /\.new-chat,[\s\S]*\.navrow,[\s\S]*\.nav-section-toggle,[\s\S]*\.web-only-toggle,[\s\S]*\.session-menu-option,[\s\S]*\.archived-toggle \{\s*min-height: 44px;/,
+    /\.new-chat,[\s\S]*\.navrow,[\s\S]*\.nav-section-toggle,[\s\S]*\.session-menu-option,[\s\S]*\.archived-toggle \{\s*min-height: 44px;/,
   );
   assert.match(compactCss, /\.session-menu-btn,[\s\S]*\.recent-project-new-chat \{\s*width: 44px;\s*height: 44px;/);
   assert.match(compactCss, /\.session-menu\s*\{\s*right:\s*0;\s*margin-top:\s*-22px;\s*\}/);

@@ -23,6 +23,7 @@ import type { RunStore } from "../runs/run-store.ts";
 import { isTerminal } from "../runs/run-store.ts";
 import type { TurnStream } from "../runs/turn-stream.ts";
 import type { TaskStore, TaskStatus } from "../tasks/task-store.ts";
+import type { AgentPersonaStore } from "../agents/persona-store.ts";
 import { swallowAs } from "../util/errors.ts";
 import { resolveRuntimeChoiceDurable, type RuntimeChoice } from "../harness/harness-router.ts";
 import { modelDisplayName } from "../model/pi-models.ts";
@@ -78,6 +79,15 @@ export interface SlackCoreClient {
   fulfillContextRequest(id: string, outcome: { result?: SurfaceContextResult; error?: string }): Promise<void>;
   pickAckEmoji(text: string, candidates: readonly string[]): Promise<string | undefined>;
   recordAckPick(pick: AckPickInput): Promise<void>;
+  /**
+   * The `@Name` token an agent persona answers to. Read ONCE at plugin start by a persona-bound
+   * bot, which publishes it to its siblings, so the whole process can translate between Slack's
+   * `<@U…>` mentions and the panel driver's `@Name` grammar without a lookup per message. A
+   * persona renamed while the process runs keeps its old token until the bot restarts.
+   */
+  personaName(personaId: string): Promise<string | undefined>;
+  /** Name + display model for a persona-bound instance's surface header. */
+  personaHeader(personaId: string): Promise<{ name: string; modelName: string } | undefined>;
 }
 
 type AckPickInput = {
@@ -104,6 +114,7 @@ export interface SlackCoreClientDeps {
   turnStream: TurnStream;
   tasks: TaskStore;
   pickAckEmoji?(text: string, candidates: readonly string[]): Promise<string | undefined>;
+  personas?: Pick<AgentPersonaStore, "get">;
   ackPicks?: AckEmojiPickStore;
   ackModelId?: () => string | undefined;
   brandingDefault?: { selfLabel?: string };
@@ -222,7 +233,14 @@ export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClien
               const view = await deps.app.getRun(runId);
               await emitTasks().catch(swallowAs("slack-core-client: terminal task refresh", undefined));
               if (view?.surfacePosted) signalSurface();
-              return (view?.result as TurnResult | null | undefined) ?? null;
+              const result = (view?.result as TurnResult | null | undefined) ?? null;
+              // Who spoke is on the RUN (the panel driver put it there), not on the result. The
+              // Slack side needs it to post the reply under that persona's own bot, so it rides
+              // out here rather than being re-derived from the roster, which would guess wrong
+              // the moment an `@tag` join reorders the room.
+              const persona = run.request.panel?.persona;
+              if (!result || !persona?.id) return result;
+              return { ...result, panelPersona: { id: persona.id, name: persona.name } };
             }
             await emitTasks();
             const fb = deps.turnStream.firstBlock(runId);
@@ -322,6 +340,19 @@ export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClien
 
     pickAckEmoji(text, candidates) {
       return deps.pickAckEmoji?.(text, candidates) ?? Promise.resolve(undefined);
+    },
+
+    async personaName(personaId) {
+      if (!deps.personas) return undefined;
+      const persona = await deps.personas.get(personaId).catch(() => null);
+      return persona?.name || undefined;
+    },
+
+    async personaHeader(personaId) {
+      if (!deps.personas) return undefined;
+      const persona = await deps.personas.get(personaId).catch(() => null);
+      if (!persona?.name) return undefined;
+      return { name: persona.name, modelName: modelDisplayName(persona.modelId) };
     },
 
     async recordAckPick(pick) {

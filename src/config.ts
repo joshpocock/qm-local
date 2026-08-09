@@ -10,7 +10,12 @@ import { parseMemoryStrategyKind, type MemoryStrategyKind } from "./memory/strat
 import { validateCoreSecretEnv } from "./deployment/secret-schema.ts";
 import { DEFAULT_CAPTURE_QUIET_MS } from "./memory/strategies/per-turn.ts";
 import { parseSecurityPosture, type SecurityPosture } from "./security/security-posture.ts";
-import { slackPluginConfigFromEnv, type SlackPluginConfig } from "./slack/config.ts";
+import {
+  resolveSlackPanelRounds,
+  slackPanelRounds,
+  slackPluginConfigFromEnv,
+  type SlackPluginConfig,
+} from "./slack/config.ts";
 import {
   MODEL_PROVIDERS,
   defaultModelForProvider,
@@ -436,6 +441,14 @@ export function boolEnv(value: string | undefined): boolean | undefined {
 export function agentRoomsEnabled(env?: NodeJS.ProcessEnv): boolean {
   return boolEnv((env ?? process.env).QM_AGENT_ROOMS) === true;
 }
+
+/**
+ * `QM_SLACK_PANEL_ROUNDS` — how many rounds a Slack room panel runs, and the precedence that
+ * puts the admin UI's setting ahead of it. Defined next to the Slack plugin config that
+ * consumes them, re-exported here so every core knob is discoverable in one place. See
+ * `src/slack/config.ts`.
+ */
+export { slackPanelRounds, resolveSlackPanelRounds };
 
 export function numEnv(value: string | undefined): number | undefined {
   if (value === undefined || value.trim() === "") return undefined;

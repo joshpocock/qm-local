@@ -1,6 +1,48 @@
 import { botIdentityFromEnv } from "./delivery.ts";
+import { ROOM_MAX_ROUNDS } from "../types.ts";
 
 export const NO_RETRY = { retryConfig: { retries: 0 } } as const;
+
+/**
+ * How many times a Slack room panel goes round its roster (`QM_SLACK_PANEL_ROUNDS`). One round
+ * — every addressed persona answers once, plus a bonus turn each for being `@mentioned` — is
+ * the default because that is what a "@BotA @BotB, discuss" message reads as. Clamped to the
+ * same 1..ROOM_MAX_ROUNDS core enforces on `RoomConfig.rounds`, so a fat-fingered env var
+ * never gets as far as a refusal.
+ *
+ * Re-exported from `src/config.ts` alongside the other core knobs.
+ */
+export function slackPanelRounds(env: Record<string, string | undefined>): number {
+  const raw = env.QM_SLACK_PANEL_ROUNDS;
+  if (raw === undefined || raw.trim() === "") return 1;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 1;
+  return clampPanelRounds(n);
+}
+
+/** The single place `1..ROOM_MAX_ROUNDS` is enforced, whatever the value came in on. */
+export function clampPanelRounds(rounds: number): number {
+  return Math.min(ROOM_MAX_ROUNDS, Math.max(1, Math.floor(rounds)));
+}
+
+/**
+ * The rounds the DEFAULT Slack bot runs a panel for: **the admin setting, then
+ * `QM_SLACK_PANEL_ROUNDS`, then 1** — always clamped to `1..ROOM_MAX_ROUNDS`.
+ *
+ * The admin value lives on the singular Slack installation record next to `panelPersonaId`
+ * (`src/surfaces/slack-installation.ts`), so an operator changes it in the admin UI and the
+ * reconciler restarts the bot on the next poll — no redeploy, no restart by hand. `null` or an
+ * absent value means "no admin choice", which is why the env var keeps working untouched for
+ * deployments that never set one. Anything non-finite is treated the same way, so a corrupted
+ * record degrades to the env var rather than to a crash.
+ */
+export function resolveSlackPanelRounds(
+  stored: number | null | undefined,
+  env: Record<string, string | undefined>,
+): number {
+  if (typeof stored === "number" && Number.isFinite(stored)) return clampPanelRounds(stored);
+  return slackPanelRounds(env);
+}
 
 export interface SlackPluginConfig {
   botToken: string;
@@ -29,6 +71,15 @@ export interface SlackPluginConfig {
    */
   personaId?: string;
   /**
+   * The persona this bot speaks as ONLY inside a room panel. Set on the DEFAULT installation, so
+   * the org's neutral assistant can take a seat in a debate without changing anything about the
+   * turns it takes on its own: with only `panelPersonaId` set, `personaId` stays unset, the turn
+   * handler puts no `room` on a solo turn, and the DM/channel header still announces the scope's
+   * runtime model. Ignored when `personaId` is also set (a registry bot is persona-bound on
+   * every turn already). Requires QM_AGENT_ROOMS, like every other persona path.
+   */
+  panelPersonaId?: string;
+  /**
    * This instance is an ADDITIONAL bot running beside the default one. Secondary instances
    * deliberately keep their hands off everything that is process-global or a shared queue:
    * no directory/mention-index push (`replaceChannels` is a REPLACE), no delivery polling and
@@ -39,6 +90,8 @@ export interface SlackPluginConfig {
   secondary?: boolean;
   /** Human label for logs, e.g. the registry record's label. */
   instanceLabel?: string;
+  /** Rounds for a Slack-triggered room panel; see `slackPanelRounds`. */
+  panelRounds?: number;
 }
 
 export function slackPluginConfigFromEnv(env: Record<string, string | undefined>): SlackPluginConfig | null {
@@ -71,6 +124,7 @@ export function slackPluginConfigFromEnv(env: Record<string, string | undefined>
     ...opt("maxPrivateChannels", num(env.SLACK_MAX_PRIVATE_CHANNELS)),
     ...opt("recentMessages", num(env.SLACK_RECENT_MESSAGES)),
     ...opt("userCacheTtlMs", num(env.SLACK_USER_CACHE_TTL_MS)),
+    ...(env.QM_SLACK_PANEL_ROUNDS?.trim() ? { panelRounds: slackPanelRounds(env) } : {}),
     ...(() => {
       const identity = botIdentityFromEnv(env);
       return Object.keys(identity).length ? { botIdentity: identity } : {};

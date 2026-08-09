@@ -12,9 +12,11 @@ import { agentRoomsEnabled, orgId as orgIdOf } from "../config.ts";
 import {
   panelAddressed,
   panelMembersFrom,
+  requestedPanelRounds,
   runPanel,
   type PanelMember,
   type PanelState,
+  type PanelTurnOutcome,
   type PanelTurnSpec,
 } from "../agents/panel-driver.ts";
 import { scopeId } from "../types.ts";
@@ -82,6 +84,14 @@ export function createTurnMethods(deps: AppDeps, h: AppHelpers, ambient: Ambient
    * Shape and visibility rules are the ones the room route enforces; anything off is a refusal
    * so the client hears about it instead of silently getting a one-agent conversation.
    */
+  /**
+   * The one rule for `rounds` on a client-supplied room, wherever it arrives: an integer in
+   * `1..ROOM_MAX_ROUNDS`, the same bound core enforces on a stored `RoomConfig`.
+   */
+  const validRounds = (rounds: unknown): rounds is number =>
+    typeof rounds === "number" && Number.isInteger(rounds) && rounds >= 1 && rounds <= ROOM_MAX_ROUNDS;
+  const ROUNDS_ERROR = `room.rounds must be 1-${ROOM_MAX_ROUNDS}`;
+
   async function roomFromRequest(
     raw: NonNullable<TurnRequest["room"]>,
     principalId: string,
@@ -96,9 +106,7 @@ export function createTurnMethods(deps: AppDeps, h: AppHelpers, ambient: Ambient
       return { error: "room.personaIds must be one or more unique agent ids" };
     }
     const rounds = raw.rounds;
-    if (typeof rounds !== "number" || !Number.isInteger(rounds) || rounds < 1 || rounds > ROOM_MAX_ROUNDS) {
-      return { error: `room.rounds must be 1-${ROOM_MAX_ROUNDS}` };
-    }
+    if (!validRounds(rounds)) return { error: ROUNDS_ERROR };
     const visible = new Map((await visiblePersonasFor(deps, h, principalId)).map((p) => [p.id, p] as const));
     for (const id of personaIds) {
       const persona = visible.get(id);
@@ -267,7 +275,11 @@ export function createTurnMethods(deps: AppDeps, h: AppHelpers, ambient: Ambient
   ): Promise<{ room: RoomConfig; joiners: PanelMember[] } | undefined> {
     const joiners = await tagJoiners(text, [], [], principalId);
     if (!joiners.length) return undefined;
-    return { room: { personaIds: joiners.map((m) => m.id), rounds: ROOM_DEFAULT_ROUNDS }, joiners };
+    // "@Critic @Scout debate this 3 times" in a plain chat sets the promoted room's budget the
+    // same way it does on Slack: a stated count wins (clamped to ROOM_MAX_ROUNDS inside the
+    // parser), silence means the default single round. PASS still ends it early.
+    const rounds = requestedPanelRounds(text) ?? ROOM_DEFAULT_ROUNDS;
+    return { room: { personaIds: joiners.map((m) => m.id), rounds }, joiners };
   }
 
   /**
@@ -397,7 +409,9 @@ export function createTurnMethods(deps: AppDeps, h: AppHelpers, ambient: Ambient
       return next;
     };
 
-    const run = async (spec: PanelTurnSpec): Promise<{ reply?: string }> => {
+    // The driver reads `status` as well as `reply`: a Slack panel turn is spine-routed and
+    // comes back `silent` with no reply at all, which is a quiet turn, not a missing one.
+    const run = async (spec: PanelTurnSpec): Promise<PanelTurnOutcome> => {
       if (spec.index === 0 && wantAsync) {
         // Async callers get the first persona's run id straight away; the rest of the panel
         // continues in the background off the same driver loop.
@@ -816,11 +830,28 @@ export function createTurnMethods(deps: AppDeps, h: AppHelpers, ambient: Ambient
       if (agentRoomsEnabled() && !req.panel && !req.approval && personTyped) {
         let roomCfg = known?.room;
         let persist: RoomConfig | undefined;
-        if (!roomCfg && req.room) {
-          const validated = await roomFromRequest(req.room, actor.id);
-          if ("error" in validated) return { status: "refused", reason: validated.error };
-          roomCfg = validated.room;
-          persist = validated.room;
+        if (req.room) {
+          if (!roomCfg) {
+            const validated = await roomFromRequest(req.room, actor.id);
+            if ("error" in validated) return { status: "refused", reason: validated.error };
+            roomCfg = validated.room;
+            persist = validated.room;
+          } else if (req.room.rounds !== undefined) {
+            // A room persisted on the session owns its ROSTER — the request cannot rewrite who is
+            // in the room, and `tagJoiners` remains the only way to enlarge it. But `rounds` is a
+            // per-dispatch budget, not membership, and the surface dispatching this message is the
+            // one that knows the operator's current setting. Slack's panel rounds are an admin
+            // choice that has to take effect in threads that already ran a panel, and without this
+            // the first panel in a thread would freeze the number forever.
+            //
+            // Web-UI turns into an existing room carry no `room` at all (the client only sends one
+            // for the first message of a brand-new room, before a session exists to hold it), so
+            // the persisted rounds still win there — see the regression test in `panel-driver`.
+            if (!validRounds(req.room.rounds)) return { status: "refused", reason: ROUNDS_ERROR };
+            roomCfg = { ...roomCfg, rounds: req.room.rounds };
+            // Deliberately NOT persisted: the stored room keeps the rounds its owner chose, and
+            // every dispatch re-reads the surface's own setting.
+          }
         }
         if (!roomCfg) {
           // No room yet, but this message tagged agents the actor can see: the tag promotes the

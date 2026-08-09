@@ -1,5 +1,5 @@
 import { swallow } from "../util/errors.ts";
-import { decodeSlackEntities, mentionsBot, resolveMentionsInText } from "./lib.ts";
+import { decodeSlackEntities, mentionsBot, mentionsSiblingBot, resolveMentionsInText } from "./lib.ts";
 import type { SlackCoreClient } from "../api/slack-core-client.ts";
 import type { IngestEvent } from "../surface-cache/surface-cache.ts";
 import type { BotIdentity, Directory } from "./directory.ts";
@@ -106,6 +106,14 @@ export function createMirror(deps: {
     }
     const raw = String(m.text ?? "");
     const { text, mentions } = await resolveTextMentions(client, decodeSlackEntities(raw));
+    // A message that names a SIBLING qm bot and not this one is already spoken for: that bot
+    // got the same event and is answering it (or PASSing on purpose). Recording it as handled
+    // is what keeps the ambient judge — which only ever looks at messages this bot was not
+    // tagged in — from having the org's neutral bot answer a question addressed to a named
+    // agent. The sibling's own mirror marks the same row `mentionsSelf`, but that write races
+    // this one and the judge fires off whichever ingest lands first, so each instance has to
+    // stand itself down rather than rely on seeing the sibling's flag in time.
+    const spokenForBySibling = !mentionsBot(raw, ids.botUserId) && mentionsSiblingBot(raw, ids.botUserId);
     await pushSurfaceEvents([
       {
         container,
@@ -118,7 +126,7 @@ export function createMirror(deps: {
         ...(m.bot_id || m.bot_profile ? { bot: true } : {}),
         ...(mentionsBot(raw, ids.botUserId) ? { mentionsSelf: true } : {}),
         ...(opts.editedAt ? { editedAt: opts.editedAt } : {}),
-        ...(opts.handled ? { handled: true } : {}),
+        ...(opts.handled || spokenForBySibling ? { handled: true } : {}),
         ...(opts.containerName ? { containerName: opts.containerName } : {}),
         kind,
       },

@@ -34,6 +34,39 @@ test("connector setup uses the live catalog and shows exact provider and callbac
   assert.match(html, /encrypted in durable storage/);
 });
 
+test("the default Slack bot's debate agent is picked from the live agent list and saved on its own", () => {
+  assert.match(html, /id="slack-installation-panel-persona"/);
+  assert.match(html, /Answers as \(in debates\)/);
+  // Populated from the same endpoint as the Slack bots card's persona picker.
+  assert.match(html, /api\("GET", "\/api\/slack-bots\/agents"\)/);
+  assert.match(html, /"slack-bot-new-persona", "slack-installation-panel-persona"/);
+  // Blank tokens means "just the agent": they are write-only and never shown again.
+  assert.match(html, /const agentOnly = !botToken && !appToken;/);
+  assert.match(html, /panelPersonaId: panelPersonaId \|\| null/);
+  assert.doesNotMatch(html, /const SLACK_PANEL_AGENTS = \[/);
+});
+
+test("debate rounds are an admin setting on the same card, bounded, clearable, and self-describing", () => {
+  assert.match(html, /id="slack-installation-panel-rounds"/);
+  assert.match(html, /Debate rounds/);
+  // Bounded by the input itself and again before the request goes out.
+  assert.match(html, /min="1"\s+max="20"/);
+  assert.match(html, /!Number\.isInteger\(panelRounds\) \|\| panelRounds < 1 \|\| panelRounds > 20/);
+  // Blank = unset = fall back to the deployment env var, then 1.
+  assert.match(html, /const panelRounds = roundsRaw \? Number\(roundsRaw\) : null;/);
+  assert.match(html, /panelRounds,/);
+  assert.match(html, /typeof r\.data\.panelRounds === "number"/);
+  // The hint states the ceiling formula and the early exit, so the number is a budget an
+  // operator can reason about rather than a mystery knob.
+  assert.match(html, /agents × rounds × 2 messages/);
+  assert.match(html, /passes ends it early/);
+  assert.match(html, /Leave blank to use the deployment default/);
+});
+
+test("the admin page stays a single inline script, because the CSP hashes exactly one", () => {
+  assert.equal(html.match(/<script/g)?.length, 1);
+});
+
 test("temporary onboarding covers model credentials, Slack, and OAuth setup", () => {
   assert.match(html, /view-onboarding/);
   assert.match(html, /Model provider/);

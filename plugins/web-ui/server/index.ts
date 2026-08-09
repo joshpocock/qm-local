@@ -989,6 +989,13 @@ const routeRequest = async (req: IncomingMessage, res: ServerResponse) => {
       return relay(res, r);
     }
 
+    // Which agents answer as a Slack bot, for the badge on the Agents page. Same flag gate and
+    // same relay shape as /api/agents; core's reply carries no tokens, only handles and labels.
+    if (method === "GET" && path === "/api/slack-bindings") {
+      const r = await coreFetch("GET", `/v1/slack-bindings?principalId=${encodeURIComponent(user)}`);
+      return relay(res, r);
+    }
+
     if (method === "GET" && path.startsWith("/api/agents/")) {
       const id = decodeURIComponent(path.slice("/api/agents/".length));
       const r = await coreFetch("GET", `/v1/agents/${encodeURIComponent(id)}?principalId=${encodeURIComponent(user)}`);

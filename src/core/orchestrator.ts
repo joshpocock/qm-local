@@ -12,6 +12,7 @@ import type {
 } from "../types.ts";
 import { scopeId as toScopeId, personalScope } from "../types.ts";
 import { turnOriginRequestFields } from "./turn-origin.ts";
+import { personaPostIdentity } from "../delivery/persona-identity.ts";
 import { resolveTurnFastMode } from "./turn-options.ts";
 import { orgId } from "../config.ts";
 import { renderGatewayContext } from "./gateway-context.ts";
@@ -74,7 +75,7 @@ import { createToolContext, NeedsApproval, CommandDenied } from "../tools/primit
 import type { BrokeredLayerTool } from "../deployment/load-layer.ts";
 import type { FileArtifact } from "../files/file-artifact-store.ts";
 import { filterHistoryForAudience, principalEntitledToScope } from "../resolution/context-filter.ts";
-import { PANEL_PASS, renderPanelSystemBlock } from "../agents/panel-driver.ts";
+import { PANEL_PASS, isPanelPass, renderPanelSystemBlock } from "../agents/panel-driver.ts";
 import type { AgentPersona } from "../agents/persona-store.ts";
 import {
   filterTapeForAudience,
@@ -852,15 +853,26 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
 
       const delivery = deliveryCandidatesFor(input.surface, input.deliveryTarget, input.deliveryCandidates, scopeId);
       const defaultCandidate = delivery.candidates.find((c) => c.key === delivery.defaultKey);
+      // A Slack panel turn's reply must go out under the SPEAKING persona's own bot, and on the
+      // spine path this destination is the single ancestor both posting routes inherit from —
+      // the shed-reply enqueue below and the surface `post` tool. Tagging it here is what makes
+      // a debate read as two bots talking instead of one bot quoting both sides; the poller in
+      // src/slack/deliveries.ts resolves the identity to that persona's client and falls back
+      // to the primary when its bot is gone.
+      const panelIdentity =
+        input.surface === "slack" && input.panel?.persona
+          ? { identity: personaPostIdentity(input.panel.persona.id) }
+          : {};
       let defaultDestination: Destination | undefined;
       if (defaultCandidate) {
         defaultDestination = {
           type: defaultCandidate.type,
           target: defaultCandidate.target,
           ...(defaultCandidate.audienceScopeId ? { audienceScopeId: defaultCandidate.audienceScopeId } : {}),
+          ...panelIdentity,
         };
       } else if (input.surfaceTools && input.origin.kind === "automation" && input.origin.destination) {
-        defaultDestination = input.origin.destination;
+        defaultDestination = { ...input.origin.destination, ...panelIdentity };
       }
       const cronBlock =
         delivery.candidates.length > 1 && deps.signingSecret && deps.apiBaseUrl
@@ -2433,6 +2445,13 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           ...(inbound.images.length ? { images: inbound.images } : {}),
         });
         const primarySubturnEndSeq = emittedEntries.at(-1)?.seq;
+        // A panel turn whose whole reply is PASS said nothing, and the shed-reply machinery
+        // below would say it out loud: it delivers the assistant text directly, and failing
+        // that NUDGES the model to post it with the surface tool. On a Slack channel every
+        // persona turn runs here (spine-routed, `surfaceTools`), which is how a quiet round
+        // put six literal "PASS" messages into a thread. Neither the direct delivery nor the
+        // nudge may run for it; the turn simply ends, and the driver reads the quiet.
+        const panelPassed = !!input.panel && isPanelPass(stripAckPrefix(result.reply ?? "", spineAckText));
         if (
           input.addressed &&
           !strictReadOnly &&
@@ -2440,7 +2459,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           surfaceToolDeps &&
           spine.surfaceOutboundCount === 0 &&
           spine.staySilentReason === undefined &&
-          !result.silent
+          !result.silent &&
+          !panelPassed
         ) {
           const firstTapeWriteFailed = !!result.tapeWriteFailed;
           // The model already wrote a reply as plain assistant text — deliver that text
