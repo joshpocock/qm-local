@@ -639,7 +639,11 @@ export function createMockHarness(): Harness {
 
         if (turn.onDelta) for (const chunk of streamChunks(reply)) turn.onDelta(chunk);
 
-        await turn.emit({ type: "assistant", payload: { text: reply }, scopeLabel: turn.scopeLabel });
+        await turn.emit({
+          type: "assistant",
+          payload: { text: reply, ...(turn.persona ? { persona: turn.persona } : {}) },
+          scopeLabel: turn.scopeLabel,
+        });
         const modelCalls = usedTool ? 2 : 1;
         const steps = Array.from({ length: modelCalls }, (_, step) => callUsage(step));
         const cacheUsage = steps.reduce(

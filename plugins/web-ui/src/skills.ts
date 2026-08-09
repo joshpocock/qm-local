@@ -1,5 +1,5 @@
 import { html, nothing, render, type TemplateResult } from "lit";
-import { Box } from "lucide";
+import { Box, FolderInput } from "lucide";
 import { api, type CoreContext } from "./core-bridge";
 import type { SkillItem } from "./composer";
 import { errMessage } from "../../chassis/src/errors";
@@ -23,6 +23,7 @@ import {
   type SkillStatusFilter,
 } from "./skill-registry";
 import { listBackLink, listPageTpl } from "./list-page";
+import { openSkillImportDialog } from "./skill-import-dialog";
 import { focusDialogCancel, restoreDialogFocus, trapDialogFocus } from "./dialog-focus";
 import { SkillsRefreshSequence } from "./skills-refresh";
 import { SkillsMutationSequence } from "./skills-mutation";
@@ -158,6 +159,10 @@ function startCreate(): void {
   creatingSaving = false;
   drawSkills();
   queueMicrotask(() => document.querySelector<HTMLInputElement>("#skill-create-name")?.focus());
+}
+
+function startImport(): void {
+  openSkillImportDialog(createScopes, () => void renderSkills());
 }
 
 function skillMeta(s: SkillItem): string {
@@ -502,6 +507,9 @@ function drawSkills(loading = false): void {
     html`${listPageTpl({
       title: "Skills",
       onRefresh: () => void renderSkills(),
+      controls: html`<button class="btn skill-import-trigger" type="button" @click=${startImport}>
+        ${icon(FolderInput, 15)}<span>Import</span>
+      </button>`,
       action: { label: "New skill", onClick: startCreate },
       search: {
         value: skillSearch,

@@ -2,6 +2,28 @@
 
 To run and test, see [`README.md`](./README.md).
 
+## THIS REPOSITORY IS qm-local (read before applying the "Private forks" rules)
+
+This checkout is **qm-local** (`origin = joshpocock/qm-local`), a *public* fork of
+`yc-software/qm` whose stated purpose is to carry a small set of local-first patches to
+core. See [`ROADMAP.md`](./ROADMAP.md).
+
+The "Private forks" section below governs *private organization forks*, whose purpose is
+running qm with org-specific customization confined to `deploy/layers/<org>/` while core
+stays byte-identical to upstream. **Those rules do not describe this repository**, and its
+"do not edit core" rule does not apply here. Editing core on the `feat/local-first`
+branch is this fork's entire reason to exist, and is expected.
+
+What still holds:
+
+- Keep patches minimal, well-commented, and individually justifiable, so each one stays
+  easy to send upstream and easy for upstream to merge past.
+- Anything worth contributing back goes upstream as its own clean change (the
+  `upstream-pr` flow), not as a bulk fork dump. Contributing upstream is encouraged.
+- Never reference an upstream issue or PR by number in this fork's commits or PRs, for
+  the mirroring reason explained below.
+- Pass `--repo` to `gh` commands so they do not target the upstream repository.
+
 ## Working on the code
 
 Two habits that keep task-focused changes from scarring the rest of the repo:

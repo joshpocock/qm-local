@@ -1,4 +1,4 @@
-import type { EntryType, ScopeId, Session, SessionEntry, SessionType } from "../types.ts";
+import type { EntryType, RoomConfig, ScopeId, Session, SessionEntry, SessionType } from "../types.ts";
 
 export interface Lease {
   sessionId: string;
@@ -23,6 +23,77 @@ export interface NewEntry {
   type: EntryType;
   payload: unknown;
   scopeLabel: ScopeId;
+  /**
+   * Explicit thread parent. Omit (the normal case) and the store keeps the linear
+   * chain — `seq - 1`, or null for the first entry. Set it to thread this entry under
+   * an older one.
+   *
+   * Core sets it for two things:
+   *
+   * 1. An `assistant` reply points at the `user` entry that triggered the turn, in every
+   *    session, so a client can render "3 replies" under the message someone actually
+   *    wrote. In a room that puts every persona in the panel on one thread (the
+   *    continuation turns write no user entry of their own, so they all land on the human
+   *    message that opened the panel).
+   * 2. A `user` entry from a turn that carried `TurnRequest.replyToSeq` points at the
+   *    THREAD ROOT that ref resolved to — a human replying in thread, Slack-style. That is
+   *    the only way a `user` entry is ever threaded; without `replyToSeq` every one of them
+   *    stays on the linear chain, exactly as before. Combined with (1) a reply in thread
+   *    reads `user(root) ← user(reply) ← assistant(answer)`, and a mid-turn steer message
+   *    stays linear because only the turn's own first `user` entry is threaded.
+   *
+   * Nothing else threads — thinking / tool_call / tool_result / system / delivery /
+   * approval entries keep the linear chain, as does an `assistant` entry from a turn no
+   * message triggered (proactive or ambient). Reading the field is presentation-only: no
+   * context window, approval flow, delivery, or transcript reconstruction consults it.
+   */
+  parentSeq?: number | null;
+}
+
+/**
+ * The thread root a reply-in-thread hangs off, walked up from the entry a client pointed
+ * at. Mirrors the walk a client makes to find the top of a thread, done server-side so what
+ * is stored is a root and never a raw ref: replying to the fifth message of a thread must
+ * extend that thread, not start a new one nested inside it.
+ *
+ * The walk:
+ * - a `user` entry whose parent is itself a `user` entry is a reply IN a thread, so the
+ *   walk climbs to that parent. Any other parent (the ordinary linear `seq - 1`, or none
+ *   at all) makes the entry the root, because a `user` entry is only ever threaded by the
+ *   reply-in-thread path above.
+ * - any other entry climbs its own `parentSeq` until it reaches a `user` entry — which is
+ *   how replying to an `assistant` lands on the message that assistant answered, and how a
+ *   transcript written before threading existed still resolves through its linear chain.
+ *
+ * Returns undefined when `refSeq` names no entry, or when the climb runs out without ever
+ * meeting a `user` entry (an assistant reply in a session no human opened). Bounded by the
+ * entries it was handed and safe against a cycle in `parentSeq`: every seq is visited once,
+ * and a revisit ends the walk with the best root found so far.
+ */
+export function resolveThreadRootSeq(
+  entries: readonly Pick<SessionEntry, "seq" | "type" | "parentSeq">[],
+  refSeq: number,
+): number | undefined {
+  const bySeq = new Map(entries.map((entry) => [entry.seq, entry] as const));
+  const parentOf = (entry: { parentSeq: number | null }) =>
+    entry.parentSeq === null ? undefined : bySeq.get(entry.parentSeq);
+
+  let current = bySeq.get(refSeq);
+  if (!current) return undefined;
+  const seen = new Set<number>();
+  let root: number | undefined;
+  while (current && !seen.has(current.seq)) {
+    seen.add(current.seq);
+    if (current.type !== "user") {
+      current = parentOf(current);
+      continue;
+    }
+    root = current.seq;
+    const parent = parentOf(current);
+    if (!parent || parent.type !== "user") break;
+    current = parent;
+  }
+  return root;
 }
 
 interface ParticipantViewPatch {
@@ -416,6 +487,9 @@ export interface SessionStore {
   get(sessionId: string): Promise<Session | null>;
 
   updateTitle(sessionId: string, title: string): Promise<void>;
+
+  /** Set (or clear, with `null`) the agent-room roster on a session. */
+  setRoom(sessionId: string, room: RoomConfig | null): Promise<void>;
 
   acquireLease(sessionId: string, holder?: LeaseHolder): Promise<LeaseAttempt>;
   releaseLease(lease: Lease): Promise<void>;

@@ -11,6 +11,15 @@
   --brand-accent: #4f46e5;
   --dev-accent: #8a5a00;
   --brand-mark: "A";
+  /* Inline `@mention` pills — deliberately not `--persona-color`: a mention names who was
+     addressed, an author badge names who spoke, and the two must never read as the same
+     kind of label. See `.mention-chip.inline-mention` below. */
+  --mention-accent: var(--brand-accent);
+  --mention-viewer-accent: #d99a21;
+  /* The thread panel's column. Wide enough for a persona chip, a paragraph and a code
+     fence without wrapping to nonsense; narrow enough that the transcript stays the
+     subject of the screen. */
+  --thread-panel-w: 400px;
 }
 
 html,
@@ -648,6 +657,39 @@ body.resizing-sidebar {
   opacity: 0.8;
 }
 
+/* Rooms get their own sidebar section, headed like Pinned but with a "+" of its own. */
+.recents-group.rooms-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.recents-group.rooms-head > svg {
+  flex: 0 0 auto;
+  opacity: 0.8;
+}
+.rooms-head-new {
+  width: 22px;
+  height: 22px;
+  /* Negative margins keep the button from growing the heading it sits in. */
+  margin: -4px -4px -4px auto;
+}
+.recents-group.rooms-head:hover .rooms-head-new,
+.rooms-head-new:focus-visible {
+  color: var(--foreground);
+  opacity: 1;
+}
+
+/* Slack gets its own sidebar section too, headed like Pinned/Rooms — no "+" of its own. */
+.recents-group.slack-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.recents-group.slack-head svg {
+  flex: 0 0 auto;
+  opacity: 0.8;
+}
+
 .session-row.colored .session {
   background: color-mix(in srgb, var(--session-color) 14%, transparent);
 }
@@ -735,6 +777,26 @@ body.resizing-sidebar {
   align-items: center;
   color: var(--muted-foreground);
   opacity: 0.7;
+}
+
+/* "Private" on a Slack DM row — quieter than the title it prefixes, loud enough to read
+   before it. Same muted-fill vocabulary as `.bg-chip`. */
+.private-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-right: 6px;
+  padding: 0 5px;
+  height: 15px;
+  border-radius: 8px;
+  color: var(--muted-foreground);
+  background: color-mix(in srgb, var(--muted-foreground) 14%, transparent);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  vertical-align: middle;
+}
+.private-chip svg {
+  flex-shrink: 0;
 }
 
 .surface-slack {
@@ -2070,7 +2132,18 @@ body.resizing-sidebar {
     0 1px 2px color-mix(in srgb, var(--foreground) 8%, transparent),
     0 12px 28px color-mix(in srgb, var(--foreground) 7%, transparent);
 }
+/*
+ * Wraps the textarea and its highlight backdrop so the backdrop can be positioned exactly
+ * over it (`inset: 0`) without affecting layout: only the textarea sits in normal flow, so
+ * this wrapper's size always tracks the textarea's own (autosized) height. See
+ * `.composer-mirror` and `syncComposerMirror` in composer.ts.
+ */
+.composer-input-wrap {
+  position: relative;
+}
 .composer-input {
+  position: relative;
+  z-index: 1;
   width: 100%;
   min-height: 48px;
   max-height: 180px;
@@ -2091,6 +2164,33 @@ body.resizing-sidebar {
 }
 .composer-input::placeholder {
   color: var(--muted-foreground);
+}
+/*
+ * The `@mention` highlight backdrop (see `mirrorTemplate`/`syncComposerMirror` in
+ * composer.ts). It mirrors the textarea's text — invisibly — so a `<mark>` around a
+ * recognised `@Name` token lands a background rectangle in exactly the right place, behind
+ * the textarea's own, fully opaque text. Must track every box property that affects where
+ * `.composer-input`'s text wraps: font, padding, line-height, box-sizing.
+ */
+.composer-mirror {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: inherit;
+  font-size: 15px;
+  line-height: 1.5;
+  padding: 3px 4px 8px;
+  box-sizing: border-box;
+  color: transparent;
+}
+.composer-mirror .composer-mention-hl {
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--mention-accent) 22%, transparent);
+  color: transparent;
 }
 .composer-approval-panel {
   display: grid;
@@ -2421,6 +2521,69 @@ body.resizing-sidebar {
   flex: 0 0 auto;
   color: var(--muted-foreground);
   font-size: 13px;
+}
+/* The `@mention` autocomplete — structurally the slash popover's twin (see `mentionMenu` in
+   composer.ts), so it reuses `.menu-title` and the same positioning as `.slash-popover`. */
+.mention-autocomplete {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  z-index: 30;
+  width: min(360px, calc(100vw - 36px));
+  padding: 6px;
+  max-height: min(320px, 52vh);
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--background);
+  box-shadow:
+    0 8px 18px color-mix(in srgb, var(--foreground) 10%, transparent),
+    0 22px 55px color-mix(in srgb, var(--foreground) 14%, transparent);
+}
+.mention-option {
+  width: 100%;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+}
+.mention-option:hover,
+.mention-option.active {
+  background: var(--secondary);
+}
+.mention-option-dot {
+  flex: 0 0 auto;
+}
+.mention-option-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.mention-option-name b {
+  color: var(--foreground);
+  font-weight: 700;
+}
+.mention-option-hint {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+  text-align: right;
 }
 .send-btn {
   width: 34px;
@@ -3140,6 +3303,132 @@ body.resizing-sidebar {
   align-items: center;
   justify-content: center;
   gap: 10px;
+}
+
+/* Import skills from a folder. The row list borrows .room-pick* wholesale — this block
+   only adds the parts a roster picker has no equivalent of: the folder input, the
+   per-row portability flag, and the run summary. */
+.skill-import-dialog {
+  width: min(560px, 100%);
+}
+.skill-import-file {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 22px 14px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-align: center;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+.skill-import-file:hover,
+.skill-import-file:focus-within {
+  border-color: color-mix(in srgb, var(--foreground) 45%, var(--border));
+  background: var(--secondary);
+}
+.skill-import-file input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+.skill-import-file-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.skill-import-file-hint {
+  max-width: 34ch;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.skill-import-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 16px;
+}
+.skill-import-count {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.skill-import-list {
+  margin-top: 8px;
+  max-height: 320px;
+}
+.skill-import-pick {
+  align-items: flex-start;
+  padding: 9px 10px;
+}
+.skill-import-pick .room-pick-box {
+  margin-top: 2px;
+}
+.skill-import-pick .room-pick-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: visible;
+  white-space: normal;
+}
+.skill-import-pick .room-pick-meta {
+  white-space: normal;
+}
+.skill-import-flag {
+  color: color-mix(in srgb, #b45309 80%, var(--foreground));
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.skill-import-flag.portable {
+  color: var(--muted-foreground);
+}
+.skill-import-note {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+.skill-import-scope {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+}
+.skill-import-scope > span {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 600;
+}
+.skill-import-progress {
+  margin: 18px 0 0;
+  font-size: 13px;
+}
+.skill-import-results {
+  margin: 10px 0 0;
+  padding: 0;
+  max-height: 200px;
+  overflow-y: auto;
+  list-style: none;
+}
+.skill-import-results li {
+  display: flex;
+  gap: 8px;
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.skill-import-results code {
+  flex: none;
+  color: var(--foreground);
 }
 @media (max-width: 620px) {
   .skill-registry-controls {
@@ -4178,6 +4467,7 @@ body.resizing-sidebar {
   }
   .pane-action,
   .list-page-action,
+  .skill-import-trigger,
   .pane .btn {
     min-height: 44px;
   }
@@ -5253,13 +5543,15 @@ body.resizing-sidebar {
   min-width: 0;
   flex-shrink: 0;
 }
-.list-page-action {
+.list-page-action,
+.skill-import-trigger {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   white-space: nowrap;
 }
-.list-page-action svg {
+.list-page-action svg,
+.skill-import-trigger svg {
   flex-shrink: 0;
 }
 @media (max-width: 620px) {
@@ -6683,10 +6975,15 @@ h3.ambient-field-label {
   padding: 6px 8px;
   border-radius: 16px;
 }
-[data-density] .composer-input {
+[data-density] .composer-input-wrap {
   flex: 1 1 120px;
   min-height: 0;
+}
+[data-density] .composer-input {
   max-height: 120px;
+  padding: 6px 6px 7px;
+}
+[data-density] .composer-mirror {
   padding: 6px 6px 7px;
 }
 [data-density] .composer-toolbar {
@@ -6827,4 +7124,686 @@ h3.ambient-field-label {
 }
 .qm-tooltip.visible {
   opacity: 1;
+}
+
+/* ---------------------------------------------------------------------------
+   Agent rooms: persona identity chips, the roster picker, and the Agents page.
+   The only new visual vocabulary is the persona dot — everything else reuses the
+   existing list-page, dialog, and form chrome.
+   --------------------------------------------------------------------------- */
+
+.new-chat-split {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.new-chat-split .new-chat {
+  margin-bottom: 0;
+}
+.new-room {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 34px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+.new-room:hover {
+  background: var(--secondary);
+  color: var(--foreground);
+}
+
+.persona-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--persona-color, var(--muted-foreground)) 18%, var(--background));
+  color: color-mix(in srgb, var(--persona-color, var(--muted-foreground)) 85%, var(--foreground));
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.persona-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 2px 8px 2px 3px;
+  border: 1px solid color-mix(in srgb, var(--persona-color, var(--border)) 32%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--persona-color, var(--secondary)) 7%, var(--background));
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+.persona-chip .persona-dot {
+  width: 17px;
+  height: 17px;
+  border-radius: 999px;
+  font-size: 9.5px;
+}
+.persona-chip .persona-name {
+  overflow: hidden;
+  color: color-mix(in srgb, var(--persona-color, var(--muted-foreground)) 70%, var(--foreground));
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.persona-chip.neutral .persona-name {
+  color: var(--muted-foreground);
+}
+
+.persona-author {
+  margin-bottom: 5px;
+}
+
+/*
+ * An `@Name` inside a message body — Slack-style: accent text on a translucent accent
+ * pill, baselined so it sits in a sentence rather than interrupting one. Deliberately its
+ * own look rather than the `.persona-chip`/`.persona-dot` an author badge uses (see
+ * `rooms.ts` `personaChip()`/`personaAuthorChip()`): a mention and an author badge answer
+ * different questions ("who was addressed" vs. "who spoke") and must never look alike.
+ * No dot glyph, no `--persona-color` — just the compact `@Name` text.
+ */
+.mention-chip.inline-mention {
+  display: inline;
+  padding: 0.5px 5px;
+  border-radius: 4px;
+  vertical-align: baseline;
+  background: color-mix(in srgb, var(--mention-accent) 16%, transparent);
+  color: color-mix(in srgb, var(--mention-accent) 88%, var(--foreground));
+  font-size: 0.92em;
+  font-weight: 600;
+  line-height: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s ease;
+}
+.mention-chip.inline-mention:hover,
+.mention-chip.inline-mention:focus-visible {
+  background: color-mix(in srgb, var(--mention-accent) 28%, transparent);
+}
+/* A mention of the viewer — same pill shape, warmer/yellow-tinted so a self-mention stands
+   out from one addressed at somebody else, the way Slack highlights "@you". */
+.mention-chip.mention-viewer {
+  background: color-mix(in srgb, var(--mention-viewer-accent) 22%, transparent);
+  color: color-mix(in srgb, var(--mention-viewer-accent) 80%, var(--foreground));
+}
+.mention-chip.mention-viewer:hover,
+.mention-chip.mention-viewer:focus-visible {
+  background: color-mix(in srgb, var(--mention-viewer-accent) 34%, transparent);
+}
+
+.mention-popover-host {
+  position: relative;
+}
+/* Positioned against the chip in script; the card itself is the shell's standard menu. */
+.mention-popover {
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: auto;
+  width: 268px;
+  max-height: min(360px, 60vh);
+}
+.mention-card-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 2px 8px 6px;
+}
+.mention-card-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+.mention-card-meta {
+  margin: 0;
+  padding: 0 8px;
+  font-size: 11.5px;
+}
+.mention-card-meta > div {
+  display: flex;
+  gap: 8px;
+  padding: 2px 0;
+}
+.mention-card-meta dt {
+  min-width: 56px;
+  color: var(--muted-foreground);
+}
+.mention-card-meta dd {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mention-card-note,
+.mention-card-instructions {
+  margin: 6px 0 0;
+  padding: 0 8px;
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.mention-card-link {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 7px 8px 4px;
+  border-top: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+  text-decoration: none;
+}
+.mention-card-link:hover {
+  color: var(--foreground);
+}
+
+.room-roster {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.room-roster::-webkit-scrollbar {
+  display: none;
+}
+.room-rounds {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* The roster shrunk to an overlapping stack of glyphs, for a sidebar room row. */
+.room-dots {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+.room-dots .persona-dot {
+  width: 15px;
+  height: 15px;
+  border-radius: 999px;
+  font-size: 8.5px;
+  box-shadow: 0 0 0 1.5px var(--background);
+}
+.room-dots .persona-dot + .persona-dot {
+  margin-left: -4px;
+}
+.room-dots-more {
+  margin-left: 3px;
+  color: var(--muted-foreground);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+/*
+ * A room turn's replies, folded under the human message that started them. The bar hangs
+ * off the bottom of the user bubble (inheriting .user-row's flex-end, so it stays attached
+ * to the message it belongs to), and the replies drop below it behind a rail.
+ */
+.thread-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  margin-top: 6px;
+  padding: 3px 9px 3px 6px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 1.35;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease,
+    color 0.12s ease;
+}
+.thread-toggle:hover {
+  border-color: var(--border);
+  background: color-mix(in srgb, var(--secondary) 62%, var(--background));
+}
+.thread-toggle .room-dots {
+  flex: 0 0 auto;
+}
+.thread-count {
+  color: color-mix(in srgb, var(--primary, var(--foreground)) 78%, var(--foreground));
+  font-weight: 600;
+  white-space: nowrap;
+}
+.thread-last {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.thread-chevron {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  transition: transform 0.14s ease;
+}
+.thread-toggle.open .thread-chevron {
+  transform: rotate(90deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .thread-toggle,
+  .thread-chevron {
+    transition: none;
+  }
+}
+
+/* "Scout was added to the room" — a system note row (see `systemNote` in core-bridge.ts):
+   one muted pill, centered, deliberately quieter than any bubble around it. */
+.chat-sys-note {
+  width: fit-content;
+  margin: 4px auto;
+  padding: 3px 12px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted-foreground) 9%, transparent);
+  color: var(--muted-foreground);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+/*
+ * The thread panel: a column of its own beside the transcript, holding the turn a thread
+ * started from, everything it drew, and a composer that replies into it. The shell is a
+ * two-row grid, so the panel is placed explicitly across both rows of a second column and
+ * every other child is pinned to the first — auto-placement would otherwise flow the
+ * bottom dock into the panel's column.
+ */
+.custom-chat-shell.thread-open {
+  grid-template-columns: minmax(0, 1fr) var(--thread-panel-w);
+}
+.custom-chat-shell.thread-open > * {
+  grid-column: 1;
+}
+.custom-chat-shell.thread-open > .thread-panel {
+  grid-column: 2;
+  grid-row: 1 / -1;
+}
+.thread-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-width: 0;
+  min-height: 0;
+  border-left: 1px solid var(--border);
+  background: color-mix(in srgb, var(--background) 94%, var(--secondary));
+}
+.thread-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 44px;
+  padding: 0 8px 0 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 68%, transparent);
+}
+.thread-panel-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 13.5px;
+  font-weight: 650;
+}
+.thread-panel-body {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 14px;
+}
+/* The stack is the transcript's, so every message renderer works here unchanged — it just
+   has no width of its own to centre within. */
+.thread-panel-stack {
+  width: 100%;
+  min-height: 0;
+}
+.thread-panel-stack .message-bubble {
+  max-width: 100%;
+}
+/* "2 replies", drawn as a rule so the root reads as the thing the rest is under. */
+.thread-panel-rule {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+.thread-panel-rule::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: color-mix(in srgb, var(--border) 80%, transparent);
+}
+.thread-panel-stack:not(:has(.thread-panel-rule + *)) .thread-panel-rule {
+  display: none;
+}
+.thread-composer {
+  padding: 10px 12px 12px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 68%, transparent);
+}
+.thread-composer-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 6px 6px 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--background);
+}
+.thread-composer-input {
+  flex: 1;
+  min-width: 0;
+  max-height: 160px;
+  padding: 5px 0;
+  border: 0;
+  background: none;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 13.5px;
+  line-height: 1.45;
+  resize: none;
+  outline: none;
+}
+.thread-composer-input::placeholder {
+  color: var(--muted-foreground);
+}
+.thread-composer .composer-error {
+  margin-bottom: 8px;
+}
+
+/*
+ * Narrow: there is no room for two columns, so the panel covers the conversation instead of
+ * sitting beside it — the same trade the sidebar makes at 860px.
+ */
+@media (max-width: 900px) {
+  .custom-chat-shell.thread-open {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .custom-chat-shell.thread-open > .thread-panel {
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    grid-column: 1;
+    border-left: none;
+    background: var(--background);
+  }
+}
+
+/*
+ * A room's identity over the live transcript. Same floating pill as the context banner,
+ * which drops below it on the rare thread that is both a room and in a shared context.
+ */
+.room-banner {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: calc(100% - 24px);
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--background) 86%, var(--secondary));
+  backdrop-filter: blur(6px);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--foreground) 8%, transparent);
+}
+.room-banner-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  max-width: 40%;
+  color: var(--foreground);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.room-banner-name > svg {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+}
+.room-banner-name > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.room-banner .room-roster {
+  margin-top: 0;
+  min-width: 0;
+}
+.room-banner ~ .context-banner {
+  top: 52px;
+}
+
+.room-dialog {
+  width: min(480px, 100%);
+}
+.room-name-field {
+  margin-top: 16px;
+}
+.room-dialog-lead {
+  margin: 12px 0 0;
+  color: var(--muted-foreground);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.room-empty {
+  margin: 14px 0 0;
+  padding: 14px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--muted-foreground);
+  font-size: 12.5px;
+  line-height: 1.5;
+  text-align: center;
+}
+.room-pick-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 14px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+.room-pick {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--foreground);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+.room-pick:hover:not(:disabled) {
+  background: var(--secondary);
+}
+.room-pick.selected {
+  border-color: color-mix(in srgb, var(--foreground) 45%, var(--border));
+  background: var(--secondary);
+}
+.room-pick:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+/* The row is the checkbox, so it needs to look like one: without a visible box
+   nothing says "pick these first" and the disabled Start button reads as broken. */
+.room-pick-box {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: 1px solid color-mix(in srgb, var(--foreground) 35%, var(--border));
+  border-radius: 4px;
+  color: var(--background);
+  font-size: 11px;
+  line-height: 1;
+}
+.room-pick.selected .room-pick-box {
+  border-color: var(--foreground);
+  background: var(--foreground);
+}
+.room-hint {
+  margin: 8px 0 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.room-pick-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.room-pick-name {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.room-pick-meta {
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.room-rounds-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+}
+.room-rounds-field > span {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted-foreground);
+}
+
+.agent-row .persona-dot {
+  width: 24px;
+  height: 24px;
+  font-size: 11px;
+}
+.agent-identity-row {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  margin-top: 18px;
+}
+.agent-identity-row > .skill-field {
+  margin-top: 0;
+}
+.agent-color-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.agent-color-input {
+  width: 42px;
+  height: 32px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--background);
+  cursor: pointer;
+}
+.agent-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.agent-swatch {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--persona-color, var(--border)) 55%, var(--border));
+  border-radius: 6px;
+  background: var(--persona-color, var(--secondary));
+  cursor: pointer;
+}
+.agent-swatch.selected {
+  outline: 2px solid color-mix(in srgb, var(--foreground) 55%, transparent);
+  outline-offset: 1px;
+}
+.agent-glyph-field {
+  max-width: 140px;
+}
+.agent-glyph-input {
+  text-align: center;
+}
+.inline-field-error {
+  display: block;
+  margin-top: 4px;
+}
+.agent-disabled-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--background);
+  text-align: left;
+}
+.agent-disabled-glyph {
+  display: inline-flex;
+  color: var(--muted-foreground);
+}
+.agent-disabled-card p {
+  margin: 6px 0 0;
+  line-height: 1.5;
+}
+
+.composer-error.room-refusal {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.composer-error.room-refusal > span {
+  min-width: 0;
+}
+
+/* Custom round count, shown when the picker is set to "Custom…". */
+.room-rounds-input {
+  width: 72px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 13px;
 }

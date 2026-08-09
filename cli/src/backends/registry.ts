@@ -153,7 +153,11 @@ const docker: HostingProvider = {
     },
   }),
   coordinates: () => ({}),
-  requiresSandboxApp: true,
+  // qm-local: the docker target runs agent sandboxes with the core's local
+  // backend (local Docker containers), so a Fly agent-computer app is not a
+  // prerequisite for a local test drive. Declaring "sandbox": { "app": ... }
+  // still opts into the Fly-published layer image and its digest-pin contract.
+  requiresSandboxApp: false,
   publishSandbox: (ctx, opts) => publishFlySandbox(ctx, opts, false),
   validateConfig: (config) => sandboxImagePinErrors(config),
 };

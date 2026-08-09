@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Session, SessionEntry, ScopeId } from "../types.ts";
+import type { RoomConfig, Session, SessionEntry, ScopeId } from "../types.ts";
 import type {
   AttributedTurn,
   CronGroupSummary,
@@ -101,6 +101,13 @@ export function createMemorySessionStore(opts: StoreOptions = {}): SessionStore 
       if (s) s.title = title;
     },
 
+    async setRoom(sessionId, room: RoomConfig | null) {
+      const s = sessions.get(sessionId);
+      if (!s) return;
+      if (room) s.room = { personaIds: [...room.personaIds], rounds: room.rounds };
+      else delete s.room;
+    },
+
     async acquireLease(sessionId, holder): Promise<LeaseAttempt> {
       const held = leases.get(sessionId);
       if (held && now() < held.expiresAt)
@@ -154,7 +161,9 @@ export function createMemorySessionStore(opts: StoreOptions = {}): SessionStore 
       const full: SessionEntry = {
         sessionId: lease.sessionId,
         seq,
-        parentSeq: seq === 0 ? null : seq - 1,
+        // An explicit parent threads this entry under an older one; without one the log
+        // stays the linear chain it has always been.
+        parentSeq: entry.parentSeq !== undefined ? entry.parentSeq : seq === 0 ? null : seq - 1,
         type: entry.type,
         payload: entry.payload,
         scopeLabel: entry.scopeLabel as ScopeId,

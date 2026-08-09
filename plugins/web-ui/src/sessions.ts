@@ -24,6 +24,8 @@ import {
   Users,
   X,
 } from "lucide";
+import { defaultRoomNameFor, noteRoom, type RoomConfig } from "./room-state";
+import { ensureRoomPersonas, roomRosterDots } from "./rooms";
 import {
   api,
   attachPendingApprovals,
@@ -46,16 +48,26 @@ import {
   chatBrowseStatusMatches,
   bumpActivity,
   groupProjectSessions,
+  isPrivateSlackRow,
+  isRoomSession,
   recencyGroup,
   recentProjectSeeds,
   reconcileSessions,
   rowIndicators,
   splitPinned,
+  splitRooms,
+  splitSlack,
+  surfaceOf,
   withPendingSession,
   withoutUnsentPending,
   type RecentItem,
   type ChatBrowseStatus,
 } from "./session-list";
+
+// Re-exported so existing callers (chat.ts, contexts.ts) keep importing it from "./sessions";
+// session-list.ts is the single source of truth to avoid an import cycle (sessions.ts already
+// imports from session-list.ts).
+export { surfaceOf };
 import { hideTooltip, showTooltip } from "./tooltip";
 import { errMessage } from "../../chassis/src/errors";
 import { copyText, fieldSelect, icon, relTime } from "./ui";
@@ -70,7 +82,7 @@ import {
 } from "./contexts";
 import { groupDmLabel, groupDmText } from "./group-dm-label";
 import { transcriptModel } from "./model-options";
-import { appState, closeSidebarOnNarrowView, renderSidebarTop, showMainEmpty } from "./shell";
+import { appState, closeSidebarOnNarrowView, renderSidebarTop, showMainEmpty, startNewRoom } from "./shell";
 import { allConversations, mainConversation } from "./conversations";
 import type { Conversation } from "./conv-types";
 import {
@@ -170,12 +182,6 @@ function listWhen(ms: number): string {
   return new Date(ms).toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
-export function surfaceOf(s: CoreSession): string {
-  if (s.threadRef.startsWith("web:")) return "web";
-  if (s.threadRef.startsWith("dm:") || s.threadRef.startsWith("ch:")) return "slack";
-  return "core";
-}
-
 export function sessionSlackUrl(s: Pick<CoreSession, "threadRef">): string | null {
   return slackThreadUrl(appState.me?.slackWorkspaceUrl ?? null, s.threadRef);
 }
@@ -193,6 +199,9 @@ function projectMenuKey(scopeId: string): string {
 }
 
 export function defaultSessionTitle(s: CoreSession): string {
+  // A room is named after its roster until someone names it, in a project or not — the
+  // roster is what the row is about, and every room surface reads the name from here.
+  if (s.room?.personaIds.length) return defaultRoomNameFor(s.room);
   const project = projectName(s.scopeId);
   if (project) return project;
   const surface = surfaceOf(s);
@@ -249,7 +258,10 @@ export function slackLogo(size = 13): TemplateResult {
 
 function visibleSessions(): CoreSession[] {
   const sorted = [...sessionsState.list].sort((a, b) => activityOf(b) - activityOf(a));
-  return sessionsState.webOnly ? sorted.filter((s) => surfaceOf(s) === "web") : sorted;
+  if (!sessionsState.webOnly) return sorted;
+  // Slack has its own group in the sidebar now, so "Web only" no longer hides it — the
+  // toggle's job is narrowed to hiding the core/misc surface only.
+  return sorted.filter((s) => surfaceOf(s) === "web" || surfaceOf(s) === "slack");
 }
 
 export function renderList(): void {
@@ -258,7 +270,13 @@ export function renderList(): void {
   const active = visible.filter((s) => !s.archived);
   const archived = visible.filter((s) => s.archived);
   const { pinned, rest } = splitPinned(active);
-  const activeItems = recentItemsFor(rest);
+  // Rooms are their own surface, so they come out before chats are grouped by project and
+  // recency — a room never nests under a project heading.
+  const { rooms, rest: afterRooms } = splitRooms(rest);
+  // Slack is its own surface too, with its own sidebar home — it never nests under a
+  // project heading or a date bucket, and it shows regardless of the "Web only" toggle.
+  const { slack, rest: chats } = splitSlack(afterRooms);
+  const activeItems = recentItemsFor(chats);
   const archivedItems: RecentItem[] = archived.map((session) => ({ kind: "session", session }));
   armMidnightRefresh();
   render(
@@ -269,6 +287,41 @@ export function renderList(): void {
               <div class="recents-group pinned-head">${icon(Pin, 11)}<span>Pinned</span></div>
               ${repeat(
                 pinned,
+                (session) => session.threadRef,
+                (session) => sessionRow(session),
+              )}
+            `
+          : nothing
+      }
+      ${
+        rooms.length
+          ? html`
+              <div class="recents-group rooms-head">
+                ${icon(Users, 11)}<span>Rooms</span>
+                <button
+                  class="recent-project-new-chat rooms-head-new"
+                  type="button"
+                  title="New room"
+                  aria-label="New room"
+                  @click=${startNewRoom}
+                >
+                  ${icon(Plus, 14)}
+                </button>
+              </div>
+              ${repeat(
+                rooms,
+                (session) => session.threadRef,
+                (session) => sessionRow(session),
+              )}
+            `
+          : nothing
+      }
+      ${
+        slack.length
+          ? html`
+              <div class="recents-group slack-head">${slackLogo(11)}<span>Slack</span></div>
+              ${repeat(
+                slack,
                 (session) => session.threadRef,
                 (session) => sessionRow(session),
               )}
@@ -293,7 +346,7 @@ export function renderList(): void {
       ${
         !sessionsLoading && !sessionsNotice && visible.length === 0
           ? html`<div class="empty" style="padding:16px">
-              ${sessionsState.list.length ? "Slack conversations hidden." : "No conversations yet."}
+              ${sessionsState.list.length ? "Other conversations hidden." : "No conversations yet."}
             </div>`
           : ""
       }
@@ -688,6 +741,17 @@ export function addPendingSession(threadRef: string, scopeId: string | null, cha
   renderList();
 }
 
+/**
+ * Stamps the roster and name a brand-new room just picked onto its not-yet-saved sidebar
+ * row, so it files under Rooms with its name from the moment it is created rather than
+ * sitting in Chats as "Web chat" until the first message creates the session. The server
+ * copy overwrites this the moment it exists.
+ */
+export function notePendingRoom(threadRef: string, room: RoomConfig, title: string): void {
+  sessionsState.list = sessionsState.list.map((s) => (s.threadRef === threadRef ? { ...s, room, title } : s));
+  renderList();
+}
+
 export function dropPendingSession(threadRef: string): void {
   sessionsState.list = withoutUnsentPending(sessionsState.list, threadRef);
   renderList();
@@ -740,6 +804,12 @@ function surfaceGlyph(s: CoreSession): TemplateResult | typeof nothing {
   return nothing;
 }
 
+/** The "Private" prefix on a Slack DM row (see `isPrivateSlackRow` for why only those). */
+function privateMark(s: CoreSession): TemplateResult | typeof nothing {
+  if (!isPrivateSlackRow(s)) return nothing;
+  return html`<span class="private-chip" title="Private conversation">${icon(Lock, 10)}<span>Private</span></span>`;
+}
+
 function rowContext(s: CoreSession): string | null {
   let label = sharedContextLabel(s.scopeId, s.channelName ?? null);
   if (surfaceOf(s) === "slack") label = s.type === "group" ? groupDmText(s.channelName) : channelLabel(s);
@@ -757,6 +827,7 @@ function sessionRow(s: CoreSession, projectChild = false): TemplateResult {
   if (untitledProjectChild) title = surfaceOf(s) === "web" ? "Web chat" : "New chat";
   const readOnly = !isContinuable(s, appState.me?.user ?? "");
   const surface = surfaceOf(s);
+  const room = isRoomSession(s);
   const context = projectChild ? null : rowContext(s);
   const working = sessionWorking(s);
   let titleContent: string | TemplateResult = groupDmTitle(s);
@@ -767,7 +838,9 @@ function sessionRow(s: CoreSession, projectChild = false): TemplateResult {
   }
   const ariaLabel = [
     title,
+    room ? "room" : null,
     surface !== "web" ? surface : null,
+    isPrivateSlackRow(s) ? "private" : null,
     context,
     working ? "agent is working" : null,
     s.awaitingInput ? "waiting for your reply" : null,
@@ -779,7 +852,7 @@ function sessionRow(s: CoreSession, projectChild = false): TemplateResult {
     .join(", ");
   return html`
     <div
-      class="session-row ${active ? "active" : ""} ${menuOpen ? "menu-open" : ""} ${readOnly ? "read-only" : ""} ${refreshingTitle ? "title-refreshing" : ""} ${working ? "working" : ""} ${s.awaitingInput ? "awaiting-input" : ""} ${projectChild ? "project-child" : ""} ${s.color ? "colored" : ""}"
+      class="session-row ${active ? "active" : ""} ${menuOpen ? "menu-open" : ""} ${readOnly ? "read-only" : ""} ${refreshingTitle ? "title-refreshing" : ""} ${working ? "working" : ""} ${s.awaitingInput ? "awaiting-input" : ""} ${projectChild ? "project-child" : ""} ${room ? "room-row" : ""} ${s.color ? "colored" : ""}"
       style=${s.color ? `--session-color:${s.color}` : nothing}
     >
       <button
@@ -797,7 +870,7 @@ function sessionRow(s: CoreSession, projectChild = false): TemplateResult {
         }}
       >
         <div class="title" aria-live="polite">
-          ${statusMarks(s)}${surfaceGlyph(s)}${readOnly ? html`<span class="ro-lock" title="Read-only">${icon(Lock, 12)}</span>` : nothing}<span
+          ${statusMarks(s)}${surfaceGlyph(s)}${privateMark(s)}${roomRosterDots(s.room)}${readOnly ? html`<span class="ro-lock" title="Read-only">${icon(Lock, 12)}</span>` : nothing}<span
             class="tl"
             >${titleContent}</span
           >${context ? html`<span class="row-context" title=${context}>${context}</span>` : nothing}
@@ -876,15 +949,19 @@ function sessionMenuPopover(s: CoreSession): TemplateResult {
       <button class="session-menu-option" type="button" role="menuitem" @click=${() => startRename(s)}>
         ${icon(Pencil, 15)}<span>Rename</span>
       </button>
-      <button
-        class="session-menu-option"
-        type="button"
-        role="menuitem"
-        ?disabled=${refreshingTitle}
-        @click=${() => void refreshSessionTitle(s)}
-      >
-        ${icon(RefreshCw, 15)}<span>${refreshingTitle ? "Refreshing title" : "Refresh title"}</span>
-      </button>
+      ${
+        autoTitleable(s)
+          ? html`<button
+              class="session-menu-option"
+              type="button"
+              role="menuitem"
+              ?disabled=${refreshingTitle}
+              @click=${() => void refreshSessionTitle(s)}
+            >
+              ${icon(RefreshCw, 15)}<span>${refreshingTitle ? "Refreshing title" : "Refresh title"}</span>
+            </button>`
+          : nothing
+      }
       <button class="session-menu-option" type="button" role="menuitem" @click=${() => setArchived(s, !archived)}>
         ${archived ? icon(ArchiveRestore, 15) : icon(Archive, 15)}<span>${archived ? "Unarchive" : "Archive"}</span>
       </button>
@@ -1085,8 +1162,22 @@ function applyResolvedSession(updated: CoreSession): void {
   );
 }
 
+/**
+ * A room is never retitled from what was said in it. The room *is* its name — the operator
+ * picked it (or it derives from the roster), and a title generated off the transcript is how
+ * a room ends up called "PASS". Rename stays available; only the derive-it-for-me path is
+ * withheld, and the button that offers it is hidden for the same reason.
+ */
+function autoTitleable(s: CoreSession): boolean {
+  return !s.room;
+}
+
 async function refreshSessionTitle(s: CoreSession): Promise<void> {
   sessionsState.openMenuId = null;
+  if (!autoTitleable(s)) {
+    renderList();
+    return;
+  }
   if (refreshingTitleIds.has(s.id)) {
     renderList();
     return;
@@ -1145,6 +1236,15 @@ export async function refreshSessions(
   try {
     const r = await api<{ sessions: CoreSession[] }>("/api/sessions");
     if (seq !== sessionRefreshSeq) return false;
+    let sawRoom = false;
+    for (const session of r.sessions ?? []) {
+      noteRoom(session.threadRef, session.room ?? null);
+      if (session.room) sawRoom = true;
+    }
+    // Room rows are drawn from the persona cache, which is empty on the first paint after a
+    // reload — so warm it and draw again, or the sidebar keeps the nameless, glyphless
+    // version it rendered before /api/agents landed.
+    if (sawRoom) void ensureRoomPersonas().then(() => renderList());
     sessionsState.list = reconcileSessions(r.sessions ?? [], sessionsState.list);
     sessionsState.loaded = true;
     sessionsNotice = "";

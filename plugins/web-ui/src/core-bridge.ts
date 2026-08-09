@@ -5,6 +5,14 @@ import { swallow } from "../../chassis/src/errors.ts";
 import { groupDmText } from "./group-dm-label.ts";
 import { base64ToBytes } from "./paste-text.ts";
 import { defaultEffortForModel, harnessSupportsEffort } from "./model-options.ts";
+import {
+  clearPendingRoom,
+  clearRoomRefusal,
+  noteRoomRefusal,
+  pendingRoomFor,
+  type MessagePersona,
+  type RoomConfig,
+} from "./room-state.ts";
 
 const BASE_URL = ((import.meta as unknown as { env?: { BASE_URL?: string } }).env?.BASE_URL ?? "/").replace(/\/$/, "");
 
@@ -61,6 +69,8 @@ export interface CoreSession {
   awaitingInput?: boolean;
   backgroundJobs?: number;
   watches?: number;
+  /** Present only on rooms: the persona roster this session runs a panel over. */
+  room?: RoomConfig | null;
 }
 
 export interface SessionBackgroundView {
@@ -134,6 +144,18 @@ export async function updateSession(
   return api<{ session: CoreSession }>(`/api/sessions/${encodeURIComponent(id)}`, {
     method: "POST",
     body: JSON.stringify(patch),
+  });
+}
+
+/**
+ * Sets (or clears, with `null`) the persona roster on an existing session — editing a room
+ * that already exists. A brand-new room does not come through here: it rides its roster in
+ * on the first turn (`drive`), because the session does not exist until that turn creates it.
+ */
+export async function updateSessionRoom(id: string, room: RoomConfig | null): Promise<{ session: CoreSession }> {
+  return api<{ session: CoreSession }>(`/api/sessions/${encodeURIComponent(id)}/room`, {
+    method: "PUT",
+    body: JSON.stringify({ room }),
   });
 }
 
@@ -253,7 +275,21 @@ export interface ApprovalDecision {
   approved: boolean;
   scope?: "once" | "session" | "always";
 }
-export type AssistantWork = AssistantMessage & { work?: WorkBlock; deliveredFiles?: DeliveredFile[] };
+export type AssistantWork = AssistantMessage & {
+  work?: WorkBlock;
+  deliveredFiles?: DeliveredFile[];
+  /** Set in rooms: which persona spoke this turn, threaded from `entry.payload.persona`. */
+  persona?: MessagePersona;
+  /** Seq of the entry this reply was built from. Absent on a client-side partial. */
+  seq?: number;
+  /**
+   * `entry.parentSeq`, carried through so the transcript can thread a reply under the human
+   * turn it answered. Core stamps this at the triggering user entry in every session now
+   * (it used to be room-only); an older entry still carries the previous linear chain, which
+   * never resolves to a user row and so renders flat — see `thread-group.ts`.
+   */
+  parentSeq?: number | null;
+};
 
 export interface RunPoll {
   status: "pending" | "running" | "done" | "failed";
@@ -279,6 +315,16 @@ export interface TurnOptions {
   harness?: string;
   scopeId?: string | null;
   channelName?: string | null;
+  /**
+   * The seq of the thread this turn is a reply into — the root human turn, as the client
+   * knows it. Core re-validates and resolves it to the real root, so handing it the root
+   * already known here is enough; the entry core writes carries that root as its
+   * `parentSeq`, which is what folds the message and its answer into the thread.
+   *
+   * Absent on every ordinary turn, which is a reply to the conversation rather than into
+   * one thread of it.
+   */
+  replyToSeq?: number;
 }
 
 export interface ActiveRun {
@@ -581,6 +627,12 @@ async function drive(
       ? (turnOptions.effortLevel ?? agent.state.thinkingLevel ?? defaultEffortForModel(model))
       : undefined;
   const timezone = browserTimezone();
+  // The first message of a brand-new room carries its roster: there is no session yet for
+  // `PUT /v1/sessions/:id/room` to attach it to, and core persists it onto the session the
+  // first persona turn creates. Not on openers or approval turns — neither is a human
+  // message, and core only reads `room` off a person-typed turn.
+  const roomForTurn = opener || approval ? null : pendingRoomFor(threadRef);
+  clearRoomRefusal(threadRef);
   try {
     notify();
     stream.push({ type: "start", partial });
@@ -595,6 +647,7 @@ async function drive(
       body: JSON.stringify({
         text,
         threadRef,
+        ...(roomForTurn ? { room: roomForTurn } : {}),
         ...(turnOptions.harness ? { harness: turnOptions.harness } : {}),
         model: model.id,
         ...(thinkingLevel ? { thinkingLevel } : {}),
@@ -602,11 +655,15 @@ async function drive(
         ...(timezone ? { timezone } : {}),
         ...(turnOptions.scopeId ? { scopeId: turnOptions.scopeId } : {}),
         ...(turnOptions.channelName ? { channelName: turnOptions.channelName } : {}),
+        ...(typeof turnOptions.replyToSeq === "number" ? { replyToSeq: turnOptions.replyToSeq } : {}),
         ...(attachments.length ? { attachments } : {}),
         ...(approval ? { approval } : {}),
         ...(opener ? { proactiveOpener: true } : {}),
       }),
     });
+
+    // Core accepted the roster and owns it from here, so the deferred PUT is not needed.
+    if (roomForTurn) clearPendingRoom(threadRef);
 
     if (submit.runId) {
       await followRun(stream, partial, submit.runId, signal, notify, undefined, slot);
@@ -621,8 +678,29 @@ async function drive(
     work.status = "failed";
     work.finishedAt = Date.now();
     notify();
+    // A refused roster means no persona ever spoke. Record it for the composer and end the
+    // stream with nothing rather than leaving a failed assistant turn nobody took.
+    const refused = roomForTurn ? refusalReason(e) : null;
+    if (refused) {
+      noteRoomRefusal(threadRef, refused);
+      work.status = "complete";
+      finish(stream, partial, { acc: "", lastProgressAt: now() }, "");
+      return;
+    }
     fail(stream, partial, e instanceof Error ? e.message : String(e));
   }
+}
+
+/**
+ * The `reason` off a refused turn (`403` + `{ status: "refused", reason }`). Anything else —
+ * a network blip, a 500, a refusal with no reason — returns null so the caller falls back to
+ * its ordinary error path.
+ */
+export function refusalReason(e: unknown): string | null {
+  if (!(e instanceof ApiError) || e.status !== 403) return null;
+  const body = e.body as { status?: unknown; reason?: unknown } | null;
+  if (!body || body.status !== "refused") return null;
+  return typeof body.reason === "string" && body.reason ? body.reason : null;
 }
 
 async function resumeDrive(
@@ -1065,6 +1143,10 @@ interface HistoryUserMessage {
   timestamp?: number;
   attachments?: HistoryAttachment[];
   steered?: boolean;
+  /** Seq of the entry this turn was built from — what a room's replies point back at. */
+  seq?: number;
+  /** The entry's stored parent — a thread reply's link to its root (see threadParentSeq). */
+  parentSeq?: number;
 }
 
 function postCallText(payload: unknown): string | null {
@@ -1076,6 +1158,20 @@ function postCallText(payload: unknown): string | null {
 function postResultOk(payload: unknown): boolean {
   const p = (payload ?? {}) as { ok?: unknown; isError?: unknown };
   return p.isError !== true && p.ok !== false;
+}
+
+/**
+ * Reads the room identity core stamps onto assistant entries. Absent outside rooms and
+ * on every entry written before rooms existed, in which case the row renders unlabelled
+ * exactly as it does today.
+ */
+export function personaFromPayload(payload: unknown): MessagePersona | undefined {
+  const p = (payload ?? {}) as { persona?: { id?: unknown; name?: unknown } | null };
+  const persona = p.persona;
+  if (!persona || typeof persona !== "object") return undefined;
+  const { id, name } = persona;
+  if (typeof id !== "string" || !id || typeof name !== "string" || !name) return undefined;
+  return { id, name };
 }
 
 function userEntryText(payload: unknown): string | null {
@@ -1106,7 +1202,13 @@ export function entriesToMessages(entries: SessionEntry[], model: Model<Api>): A
     }
     deliveryFiles.push(...files);
   };
-  const flushWork = (text: string, at?: number, closed = false): void => {
+  const flushWork = (
+    text: string,
+    at?: number,
+    closed = false,
+    persona?: MessagePersona,
+    link?: { seq?: number; parentSeq?: number | null },
+  ): void => {
     if (!text && !pending.length && !deliveryFiles.length) return;
     const deliveredSilence = (a: ToolActivity): boolean => {
       if (a.type !== "tool_result") return false;
@@ -1141,6 +1243,9 @@ export function entriesToMessages(entries: SessionEntry[], model: Model<Api>): A
         activity: pending,
       };
     if (deliveryFiles.length) msg.deliveredFiles = deliveryFiles;
+    if (persona) msg.persona = persona;
+    if (typeof link?.seq === "number") msg.seq = link.seq;
+    if (typeof link?.parentSeq === "number") msg.parentSeq = link.parentSeq;
     out.push(msg as AgentMessage);
     pending = [];
     deliveryFiles = [];
@@ -1201,6 +1306,10 @@ export function entriesToMessages(entries: SessionEntry[], model: Model<Api>): A
           content: userText,
           timestamp: e.createdAt,
           ...(payload?.steered ? { steered: true } : {}),
+          ...(typeof e.seq === "number" ? { seq: e.seq } : {}),
+          // A thread reply's link to its root. Without this, a threaded user entry loses its
+          // parentage on every transcript refresh and pops out of the thread as a new root.
+          ...(typeof e.parentSeq === "number" ? { parentSeq: e.parentSeq } : {}),
         };
         if (atts.length) {
           msg.attachments = atts.map((a, i) => ({
@@ -1215,6 +1324,7 @@ export function entriesToMessages(entries: SessionEntry[], model: Model<Api>): A
         out.push(msg as AgentMessage);
       }
     } else if (e.type === "assistant") {
+      const persona = personaFromPayload(e.payload);
       if (text || pending.length || heldPosts.size) {
         spillHeldPosts();
         if (posted && text) {
@@ -1225,17 +1335,35 @@ export function entriesToMessages(entries: SessionEntry[], model: Model<Api>): A
             payload: { text, demoted: true },
             createdAt: e.createdAt,
           });
-          flushWork("", e.createdAt);
+          flushWork("", e.createdAt, false, persona, e);
         } else {
-          flushWork(text, e.createdAt, !posted);
+          flushWork(text, e.createdAt, !posted, persona, e);
         }
       }
       posted = false;
     } else if (e.type === "delivery") {
       appendDeliveryFiles(deliveredFilesFromAttachments(payload?.files));
     } else if (e.type === "system") {
-      const failure = e.payload as { kind?: string; message?: string } | null;
-      if (failure?.kind === "turn_failure" && typeof failure.message === "string" && failure.message) {
+      const failure = e.payload as { kind?: string; message?: string; text?: string } | null;
+      if (failure?.kind === "agent_room_join" && typeof failure.text === "string" && failure.text) {
+        // An `@tag` pulled agents into the room (core writes the note server-side, see
+        // `noteRoomJoin` in src/api/app-turn.ts). Rendered as a standalone muted line —
+        // `systemNote` short-circuits `settledChatMessage` before any bubble chrome.
+        spillHeldPosts();
+        flushWork("", e.createdAt);
+        const note: AssistantMessage = {
+          role: "assistant",
+          content: [{ type: "text", text: "" }],
+          api: model.api,
+          provider: model.provider,
+          model: model.id,
+          usage: zeroUsage(),
+          stopReason: "stop",
+          timestamp: e.createdAt,
+        };
+        (note as AgentMessage & { systemNote?: string }).systemNote = failure.text;
+        out.push(note as AgentMessage);
+      } else if (failure?.kind === "turn_failure" && typeof failure.message === "string" && failure.message) {
         spillHeldPosts();
         flushWork("", e.createdAt);
         const msg: AssistantMessage = {

@@ -133,6 +133,14 @@ export function createTurnHandler(deps: {
   botToken: string;
   trustedFileHost?: string;
   ensureHeader?: (client: SurfaceHeaderClient, channel: string, scopeId: string, kind: "dm" | "channel") => void;
+  /**
+   * This bot speaks AS an agent persona. Every turn it submits carries a single-member room
+   * roster, which is the request-borne room config core already validates and runs (the same
+   * path the web room panel uses), so the turn runs with the persona's harness, model and
+   * instructions instead of the default org agent. Core ignores it when QM_AGENT_ROOMS is off,
+   * and when the session already has a room of its own.
+   */
+  personaId?: string;
 }): TurnHandler {
   const {
     bridge,
@@ -438,6 +446,9 @@ export function createTurnHandler(deps: {
       ...(attachments.length ? { attachments } : {}),
       ...(issues.length ? { inboundNotes: issues } : {}),
       ...(timezone ? { timezone } : {}),
+      // A persona-bound bot answers as that persona: one member, one round. Core validates the
+      // roster (visible, enabled, not archived) and refuses the turn with a reason if it fails.
+      ...(deps.personaId ? { room: { personaIds: [deps.personaId], rounds: 1 } } : {}),
     };
     const tSubmit = performance.now();
     let result: TurnResult;

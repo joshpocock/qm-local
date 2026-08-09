@@ -74,9 +74,11 @@ import { createToolContext, NeedsApproval, CommandDenied } from "../tools/primit
 import type { BrokeredLayerTool } from "../deployment/load-layer.ts";
 import type { FileArtifact } from "../files/file-artifact-store.ts";
 import { filterHistoryForAudience, principalEntitledToScope } from "../resolution/context-filter.ts";
+import { PANEL_PASS, renderPanelSystemBlock } from "../agents/panel-driver.ts";
+import type { AgentPersona } from "../agents/persona-store.ts";
 import {
   filterTapeForAudience,
-  foldTape,
+  foldTapeForPersona,
   healFoldInterrupt,
   lastImportLacksScopes,
   lintFold,
@@ -185,6 +187,38 @@ const DEFAULT_APPROVAL_SUMMARY_TIMEOUT_MS = 6_000;
 const CONNECTOR_HOSTS = Object.values(PROVIDERS).flatMap((p) => p.hosts);
 const INSTANCE_CACHE_MAX_ENTRIES = 5_000;
 const DIRECTORY_INDEX_CACHE_MAX_ENTRIES = 100;
+
+/**
+ * Persona instructions + roster for one room turn, or "" when anything is missing — a room whose
+ * personas were deleted mid-panel degrades to an ordinary turn rather than failing it.
+ */
+async function panelSystemBlock(
+  deps: Pick<OrchestratorDeps, "personas" | "sessions">,
+  threadRef: string,
+  personaId: string,
+  rosterIds?: readonly string[],
+  position?: { round?: number; rounds?: number },
+): Promise<string> {
+  const personas = deps.personas;
+  if (!personas) return "";
+  try {
+    const speaker = await personas.get(personaId);
+    if (!speaker) return "";
+    // The driver passes the roster in-band so the very first turn of a brand-new room —
+    // before any session row exists — still introduces every member.
+    const room = rosterIds?.length
+      ? { personaIds: [...rosterIds] }
+      : (await deps.sessions.getByThread(threadRef))?.room;
+    const ids = room?.personaIds.length ? room.personaIds : [personaId];
+    const roster = (await Promise.all(ids.map((id) => personas.get(id)))).filter(
+      (p): p is AgentPersona => !!p && p.archivedAt === undefined,
+    );
+    return `\n\n${renderPanelSystemBlock(speaker, roster, position)}`;
+  } catch (e) {
+    swallow("orchestrator: panel system block", e);
+    return "";
+  }
+}
 
 export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   const skillMaterializer = createSkillMaterializer(deps.advisoryLock);
@@ -797,7 +831,15 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         modeFrame += "\nNo one has written yet; open the conversation yourself per the onboarding note below.";
       }
       const sharedCore = applyPromptVars(SHARED_CORE_MD, { botName, orgName });
-      let systemPrompt = `${modeFrame}\n\n${resolution.systemPrompt}\n\n${sharedCore}\n\n${renderSecurityPolicyPrompt(securityPolicy)}`;
+      // A persona composes directly below the SOUL stack, under the same org-authoritative
+      // framing, followed by the roster it is speaking to. Outside rooms this is empty.
+      const panelBlock = input.panel
+        ? await panelSystemBlock(deps, conversation.threadRef, input.panel.persona.id, input.panel.rosterIds, {
+            ...(typeof input.panel.round === "number" ? { round: input.panel.round } : {}),
+            ...(typeof input.panel.rounds === "number" ? { rounds: input.panel.rounds } : {}),
+          })
+        : "";
+      let systemPrompt = `${modeFrame}\n\n${resolution.systemPrompt}${panelBlock}\n\n${sharedCore}\n\n${renderSecurityPolicyPrompt(securityPolicy)}`;
       const scopeProfile = supportsScopeProfile(deps.sandbox)
         ? await deps.sandbox
             .profileFor(memoryScopeId)
@@ -1853,6 +1895,17 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         }
         const visibleHistory = filterHistory(forModelContext(rawEntries, { includeSecurityTainted: false }));
         const maxEntrySeq = rawEntries.length ? rawEntries[rawEntries.length - 1]!.seq : -1;
+        // Room threading: the seq of the newest `user` entry already in the log, read off the
+        // history this turn has anyway (no extra query). A panel's continuation turns write no
+        // user entry, so every persona in the panel lands on the same message — which is exactly
+        // the human message that opened it. undefined when the session has never had one.
+        const priorUserEntrySeq = (() => {
+          for (let i = rawEntries.length - 1; i >= 0; i -= 1) {
+            const entry = rawEntries[i]!;
+            if (entry.type === "user") return entry.seq;
+          }
+          return undefined;
+        })();
         const rehydrateTape = (messages: readonly unknown[]) => {
           let readableHandles: Awaited<ReturnType<typeof deps.acl.handlesForAudience>> | undefined;
           const mayReadArtifact = async (artifact: FileArtifact): Promise<boolean> => {
@@ -1929,7 +1982,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               sameHarness &&
               eventsEntitled &&
               participantHistorySeqs === undefined;
-            let fold = eligible ? await rehydrateTape(foldTape(rows)) : undefined;
+            // In a room the tape is folded from the speaking persona's point of view: its own
+            // words stay assistant-role, everyone else's arrive as another speaker.
+            let fold = eligible ? await rehydrateTape(foldTapeForPersona(rows, input.panel?.persona)) : undefined;
             if (eligible && rows.length && fold && tapeNeedsInterruptHeal(rows, fold)) {
               const interrupt = await deps.sessions.appendTape(lease, {
                 kind: "context_event",
@@ -2004,8 +2059,15 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         let firstChunkAt: number | undefined;
         let lastChunkAt: number | undefined;
         const emittedEntries: SessionEntry[] = [];
+        // A panel continuation turn's text is the driver's nudge, not a message anyone sent: it
+        // reaches the harness as the turn input and stops there (see `emit` and `tape` below).
+        const panelContinuation = input.panel?.continuation === true;
         const syntheticPrompt =
-          (input.proactiveOpener && !input.text.trim()) || automatedTurn || partial || approvalReplay;
+          (input.proactiveOpener && !input.text.trim()) ||
+          automatedTurn ||
+          partial ||
+          approvalReplay ||
+          panelContinuation;
         failureUserPayload =
           !syntheticPrompt && input.text.trim()
             ? {
@@ -2015,8 +2077,11 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                 ...(input.displayText?.trim() ? { display: input.displayText } : {}),
               }
             : undefined;
+        // A room carries its own name — the one its creator typed, or its roster. Auto-titling
+        // it from the conversation is how a room ended up called "PASS".
+        const autoTitleAllowed = !session.room;
         const earlyTitleGen: Promise<string | undefined> | undefined =
-          humanTurn && !session.title && !syntheticPrompt && input.text.trim()
+          autoTitleAllowed && humanTurn && !session.title && !syntheticPrompt && input.text.trim()
             ? generateAndStoreTitle(session.id, scopeId, `User:\n${stripTurnBoilerplate(input.text)}`)
             : undefined;
         const requestedTurnWallClockMs =
@@ -2072,6 +2137,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             ...(extras.images?.length ? { images: extras.images } : {}),
             ...(input.harness ? { harness: input.harness } : {}),
             ...(input.model ? { model: input.model } : {}),
+            // Adapters stamp this onto the assistant entry payload and the assistant tape row.
+            ...(input.panel ? { persona: input.panel.persona } : {}),
             ...(input.thinkingLevel ? { thinkingLevel: input.thinkingLevel } : {}),
             ...(typeof effectiveFastMode === "boolean" ? { fastMode: effectiveFastMode } : {}),
             ...(strictReadOnly ? { readOnly: true } : {}),
@@ -2166,6 +2233,10 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               if (rec.kind !== "message" || rec.meta?.bareText === undefined) {
                 return withManagedRosterVersion(() => deps.sessions.appendTape(lease, rec));
               }
+              // The trigger row (the one carrying bareText) is the turn input. For a panel
+              // continuation that input is the nudge, so it stays out of the tape too —
+              // otherwise every later persona would read a pile of "it is your turn" prompts.
+              if (panelContinuation) return Promise.resolve(undefined);
               const meta = {
                 ...rec.meta,
                 ...(actor.displayName?.trim() ? { author: actor.displayName.trim() } : {}),
@@ -2174,6 +2245,39 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               return withManagedRosterVersion(() => deps.sessions.appendTape(lease, { ...rec, meta }));
             },
             emit: async (entry) => {
+              // "PASS" is how a persona says it has nothing to add. It is a signal to the
+              // driver, not something anybody said, so it never reaches the transcript —
+              // otherwise a quiet room fills with the word PASS, and the session auto-titler
+              // happily names the room after it.
+              if (
+                input.panel &&
+                entry.type === "assistant" &&
+                String((entry.payload as { text?: string } | null)?.text ?? "").trim() === PANEL_PASS
+              ) {
+                return {
+                  sessionId: session.id,
+                  seq: maxEntrySeq,
+                  parentSeq: null,
+                  type: "assistant" as const,
+                  payload: entry.payload,
+                  scopeLabel: entry.scopeLabel,
+                  createdAt: Date.now(),
+                };
+              }
+              if (panelContinuation && entry.type === "user") {
+                // Not persisted: hand the adapter an unsaved stand-in so the code that keys
+                // LLM-request records off the trigger entry keeps working, pointed at the last
+                // real entry rather than at a user message that does not exist.
+                return {
+                  sessionId: session.id,
+                  seq: maxEntrySeq,
+                  parentSeq: null,
+                  type: "user" as const,
+                  payload: entry.payload,
+                  scopeLabel: entry.scopeLabel,
+                  createdAt: Date.now(),
+                };
+              }
               const persistStart = Date.now();
               try {
                 const stored = (() => {
@@ -2190,7 +2294,46 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                   if (syntheticPrompt) payload.hidden = true;
                   return { ...tainted, payload };
                 })();
-                const appended = await withManagedRosterVersion(() => deps.sessions.append(lease, stored));
+                // A reply threads under the message that triggered it, in every session — a
+                // room panel, a 1:1 web chat, a Slack thread alike — so a client can render
+                // "3 replies" under the message someone actually wrote. Only the final
+                // `assistant` entry threads: thinking / tool_call / tool_result keep the default
+                // linear parent, so a client that walks the chain still sees the working order.
+                //
+                // The parent is the user entry THIS turn wrote. A panel is the one exception
+                // that also looks backwards: its continuation turns write no user entry of their
+                // own, so they fall back to the newest user entry already in the log, which is
+                // exactly the human message that opened the panel — that is what puts every
+                // persona in the panel on one thread. Outside a panel there is deliberately no
+                // fallback: a turn nobody triggered (proactive, ambient, an approval resume that
+                // re-enters with no fresh message) has no message to hang off and stays linear.
+                //
+                // The turn's own `user` entry threads too, and only when the human replied in
+                // thread: `input.replyToSeq` is the THREAD ROOT `App.turn` resolved, so the chain
+                // reads root ← this message ← the reply to it. Only the FIRST user entry of the
+                // turn — a mid-turn steer writes one of its own, and that is a new message on the
+                // linear chain, not a second reply into the thread.
+                const threadParentSeq = ((): number | undefined => {
+                  if (stored.type === "user") {
+                    return spine.turnUserEntrySeq === undefined ? input.replyToSeq : undefined;
+                  }
+                  if (stored.type !== "assistant") return undefined;
+                  if (input.panel) return spine.turnUserEntrySeq ?? priorUserEntrySeq;
+                  // An ordinary one-on-one turn stays LINEAR. Threading a lone agent's answer
+                  // under the message it answered is technically true and practically useless:
+                  // every exchange becomes a thread of one, and a plain chat turns into a list
+                  // of collapsed rows with the conversation hidden inside them. A thread earns
+                  // its shape when there is something to separate — several personas answering
+                  // the same message (the panel above), or a human deliberately replying into
+                  // one (below).
+                  return input.replyToSeq !== undefined ? spine.turnUserEntrySeq : undefined;
+                })();
+                const appended = await withManagedRosterVersion(() =>
+                  deps.sessions.append(
+                    lease,
+                    threadParentSeq === undefined ? stored : { ...stored, parentSeq: threadParentSeq },
+                  ),
+                );
                 emittedEntries.push(appended);
                 if (appended.type === "user" && spine.turnUserEntrySeq === undefined)
                   spine.turnUserEntrySeq = appended.seq;
@@ -2353,7 +2496,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                       eventsEntitled &&
                       primarySubturnComplete
                     ) {
-                      const fold = await rehydrateTape(foldTape(rows));
+                      const fold = await rehydrateTape(foldTapeForPersona(rows, input.panel?.persona));
                       if (fold.length && lintFold(fold).ok) return { rows, mode: "serve" as const, fold };
                     }
                     return { rows, mode: "shadow" as const };
@@ -2664,7 +2807,13 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                 }
               }
             }
-            if (!pausing && turnCompleted && !session.title && !(earlyTitleGen && (await earlyTitleGen))) {
+            if (
+              !pausing &&
+              turnCompleted &&
+              autoTitleAllowed &&
+              !session.title &&
+              !(earlyTitleGen && (await earlyTitleGen))
+            ) {
               await generateAndStoreTitle(session.id, scopeId, `User:\n${input.text}\n\nAssistant:\n${result.reply}`);
             }
           } finally {
@@ -2838,7 +2987,15 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         if ((err instanceof NonRetryableTurnError || input.finalAttempt) && !input.cancel?.aborted) {
           if (failureUserPayload) {
             await deps.sessions
-              .append(lease, { type: "user", payload: failureUserPayload, scopeLabel: scopeId as ScopeId })
+              .append(lease, {
+                type: "user",
+                payload: failureUserPayload,
+                scopeLabel: scopeId as ScopeId,
+                // The message is back-filled because the turn died before persisting it, so it
+                // is still the turn's own first user entry — a reply in thread belongs in its
+                // thread whether or not anything ever answered it.
+                ...(input.replyToSeq !== undefined ? { parentSeq: input.replyToSeq } : {}),
+              })
               .catch(swallowAs("orchestrator: turn failure user back-fill", undefined));
           }
           const payload: TurnFailurePayload = { kind: "turn_failure", message: turnFailureMessage(err) };

@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { CliError, bold, die, dim, errMessage, header, note, ok, step, warn } from "../log.ts";
@@ -398,21 +398,187 @@ function runArgs(ctx: DockerCtx, service: ServiceName, image: string): { args: s
     "--restart",
     "no",
   ];
-  const cleanup = pushEnvArgs(args, serviceEnv(ctx, service), secretEnvKeys(ctx, service));
+  const env = serviceEnv(ctx, service);
+  // qm-local: the service images bake ENV NODE_ENV=production, but the docker
+  // target is a local test drive by definition (its own docs say so, and
+  // `qm rollback` is not even implemented for it). In production mode the
+  // portal refuses PORTAL_LOCAL_AUTH_BYPASS and the auth broker refuses the
+  // http://localhost issuer it was just handed, so browser sign-in is
+  // impossible on this target as shipped. Run the sign-in surfaces in
+  // development mode here; core stays in production mode, so it still demands
+  // signed portal identity and source auth.
+  if (service === "portal" || service === "auth") args.push("-e", "NODE_ENV=development");
+  // qm-local: on a local test drive, signing in should not be a chore. The
+  // portal already ships a local bypass, gated three ways (explicitly
+  // requested, not production, and a localhost/127.0.0.1/::1 public URL), so
+  // it cannot apply to a real deployment. Default it on for the docker target
+  // and sign in as the first admin from ADMIN_GRANTS. Opt out with
+  // QM_NO_LOCAL_AUTH_BYPASS=1, or by setting PORTAL_LOCAL_AUTH_BYPASS
+  // yourself, to walk the real sign-in flow instead.
+  if (service === "portal" && localAuthBypassEnabled(env)) {
+    args.push("-e", "PORTAL_LOCAL_AUTH_BYPASS=1");
+    // Peer address cannot gate this from inside a container (host traffic
+    // arrives from the bridge gateway), so the port is published to the host's
+    // loopback instead - see hostPortBinding below. The two must move together.
+    args.push("-e", "PORTAL_LOCAL_BYPASS_TRUSTED_INGRESS=1");
+    const principal = env.PORTAL_DEV_PRINCIPAL ?? firstAdminGrant(ctx);
+    if (principal) args.push("-e", `PORTAL_DEV_PRINCIPAL=${principal}`);
+    note(
+      `sign-in: local bypass on (as ${principal ?? "the default dev principal"}), portal bound to loopback only; ` +
+        `set QM_NO_LOCAL_AUTH_BYPASS=1 for the real sign-in flow`,
+    );
+  }
+  const cleanup = pushEnvArgs(args, env, secretEnvKeys(ctx, service));
   if (service === "core") {
     args.push("-v", `${ctx.prefix}-coredata:/data`);
     for (const m of layerMounts(ctx)) args.push("-v", m);
     for (const m of skillMounts(ctx)) args.push("-v", m);
+    // qm-local: the local sandbox backend runs agent computers as sibling
+    // containers, so a containerized core needs the host daemon socket and a
+    // network it shares with the sandboxes it starts. Mounting docker.sock is
+    // host-root-equivalent access for the core container: acceptable for a
+    // local test drive on your own machine, which is the only place the local
+    // backend runs; the cloud targets never do this.
+    if (env.SANDBOX_BACKEND === "local") {
+      args.push("-v", "/var/run/docker.sock:/var/run/docker.sock");
+      args.push("-e", `LOCAL_SANDBOX_SHARED_NETWORK=${ctx.network}`);
+      const sockGid = statSockGid();
+      if (sockGid !== undefined) args.push("--group-add", String(sockGid));
+    }
+    // qm-local: on this local-only target, reuse the operator's own Claude Code
+    // login the way a desktop harness does, instead of requiring
+    // `claude setup-token`. Opt out with QM_NO_HOST_CLAUDE_AUTH=1.
+    // Mount every host login that exists, not just the deployment default's:
+    // the admin can approve additional harnesses at runtime, and a harness
+    // whose credentials were never mounted fails every turn with "not logged
+    // in" even though the picker offers it.
+    const hostClaude = hostClaudeCredentialsPath();
+    if (hostClaude) {
+      args.push("-v", `${hostMountPath(hostClaude)}:/run/qm/claude-credentials.json:ro`);
+      args.push("-e", "CLAUDE_CREDENTIALS_FILE=/run/qm/claude-credentials.json");
+      note(`claude auth: reusing your local login (${hostClaude})`);
+    }
+    const hostCodex = hostCodexAuthPath();
+    if (hostCodex) {
+      args.push("-v", `${hostMountPath(hostCodex)}:/run/qm/codex-auth.json:ro`);
+      args.push("-e", "CODEX_AUTH_FILE=/run/qm/codex-auth.json");
+      note(`codex auth: reusing your local login (${hostCodex})`);
+    }
   }
   if (def.docker.hostPortOffset !== undefined) {
-    args.push("-p", `${baseHostPort(ctx) + def.docker.hostPortOffset}:${def.docker.internalPort}`);
+    const hostPort = baseHostPort(ctx) + def.docker.hostPortOffset;
+    if (service === "portal" && localAuthBypassEnabled(env)) {
+      // Restricting the portal to loopback is what keeps the auth bypass a
+      // this-machine-only affair; docker's default 0.0.0.0 would put an
+      // unauthenticated portal on the LAN. Bind BOTH loopback stacks: Windows
+      // and modern Linux resolve "localhost" to ::1 first, so an IPv4-only
+      // bind leaves the browser's requests refused on the address it actually
+      // dials.
+      args.push("-p", `127.0.0.1:${hostPort}:${def.docker.internalPort}`);
+      args.push("-p", `[::1]:${hostPort}:${def.docker.internalPort}`);
+    } else {
+      args.push("-p", `${hostPort}:${def.docker.internalPort}`);
+    }
   }
   args.push(image);
   return { args, cleanup };
 }
 
+function hostClaudeCredentialsPath(): string | undefined {
+  if (process.env.QM_NO_HOST_CLAUDE_AUTH === "1") return undefined;
+  const explicit = process.env.QM_CLAUDE_CREDENTIALS_FILE?.trim();
+  if (explicit) return existsSync(explicit) ? explicit : undefined;
+
+  const candidates: string[] = [];
+  const home = process.env.HOME ?? process.env.USERPROFILE;
+  if (home) candidates.push(join(home, ".claude", ".credentials.json"));
+  // Under WSL the login often lives on the Windows side, where the user
+  // actually runs `claude`, while the Linux home holds an older one.
+  const user = process.env.USER ?? process.env.USERNAME;
+  if (user && existsSync("/mnt/c/Users")) {
+    candidates.push(join("/mnt/c/Users", user, ".claude", ".credentials.json"));
+  }
+
+  const present = candidates.filter((path) => existsSync(path));
+  const unexpired = present.find((path) => claudeCredentialsExpiry(path) > Date.now());
+  if (unexpired) return unexpired;
+  if (present.length) {
+    warn(
+      `the Claude login at ${present[0]} looks expired — run \`claude\` to refresh it, or set QM_CLAUDE_CREDENTIALS_FILE to a current one`,
+    );
+    return present[0];
+  }
+  return undefined;
+}
+
+/**
+ * Local sign-in bypass: on by default for this local-only target, off if the
+ * operator asked for the real flow or configured the portal env themselves.
+ */
+function localAuthBypassEnabled(env: Record<string, string>): boolean {
+  return process.env.QM_NO_LOCAL_AUTH_BYPASS !== "1" && env.PORTAL_LOCAL_AUTH_BYPASS === undefined;
+}
+
+/** First email in ADMIN_GRANTS ("a@x.com:org_admin,b@x.com:org_admin"). */
+function firstAdminGrant(ctx: DockerCtx): string | undefined {
+  const raw = process.env.ADMIN_GRANTS ?? readEnvValue(ctx.envFile, "ADMIN_GRANTS");
+  const first = raw?.split(",")[0]?.split(":")[0]?.trim();
+  return first || undefined;
+}
+
+/** Same idea as the Claude login, for `codex login` (~/.codex/auth.json). */
+function hostCodexAuthPath(): string | undefined {
+  if (process.env.QM_NO_HOST_CODEX_AUTH === "1") return undefined;
+  const explicit = process.env.QM_CODEX_AUTH_FILE?.trim();
+  if (explicit) return existsSync(explicit) ? explicit : undefined;
+  const candidates: string[] = [];
+  const home = process.env.HOME ?? process.env.USERPROFILE;
+  if (home) candidates.push(join(home, ".codex", "auth.json"));
+  const user = process.env.USER ?? process.env.USERNAME;
+  if (user && existsSync("/mnt/c/Users")) candidates.push(join("/mnt/c/Users", user, ".codex", "auth.json"));
+  return candidates.find((path) => existsSync(path));
+}
+
+/** Expiry only; credential values are never read into the CLI's own state. */
+function claudeCredentialsExpiry(path: string): number {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as {
+      claudeAiOauth?: { expiresAt?: number };
+      expiresAt?: number;
+    };
+    const raw = parsed.claudeAiOauth?.expiresAt ?? parsed.expiresAt;
+    if (typeof raw !== "number") return Number.POSITIVE_INFINITY; // no expiry recorded: let the child judge
+    return raw > 1e12 ? raw : raw * 1000;
+  } catch {
+    return 0;
+  }
+}
+
+function statSockGid(): number | undefined {
+  try {
+    return statSync("/var/run/docker.sock").gid;
+  } catch {
+    // No unix socket to stat (e.g. the CLI itself runs on native Windows);
+    // fall back to the root group so the in-container `node` user can reach
+    // the mounted socket. Local-test-drive-only, see the mount note above.
+    return 0;
+  }
+}
+
+/**
+ * qm-local: a Windows host path (`C:\Users\me\x`) is not reliably accepted in a
+ * `-v host:container` argument, where the backslashes and the drive colon are
+ * ambiguous. Docker Desktop accepts forward slashes on every platform, so
+ * normalize there and leave POSIX paths untouched.
+ */
+function hostMountPath(path: string): string {
+  return process.platform === "win32" ? path.replace(/\\/g, "/") : path;
+}
+
 function skillMounts(ctx: DockerCtx): string[] {
-  return ctx.config.skills.map((s, i) => `${resolve(ctx.configDir, s)}:/app/plugins/deployment-skills-${i}/skills:ro`);
+  return ctx.config.skills.map(
+    (s, i) => `${hostMountPath(resolve(ctx.configDir, s))}:/app/plugins/deployment-skills-${i}/skills:ro`,
+  );
 }
 
 function existingLayerSubdirs(ctx: DockerCtx): Array<"skills" | "tools"> {
@@ -420,7 +586,7 @@ function existingLayerSubdirs(ctx: DockerCtx): Array<"skills" | "tools"> {
 }
 
 function layerMounts(ctx: DockerCtx): string[] {
-  return existingLayerSubdirs(ctx).map((sub) => `${join(ctx.sandboxDir, sub)}:/layer/${sub}:ro`);
+  return existingLayerSubdirs(ctx).map((sub) => `${hostMountPath(join(ctx.sandboxDir, sub))}:/layer/${sub}:ro`);
 }
 
 function noteLogTail(name: string, logs: string): void {

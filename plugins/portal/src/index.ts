@@ -69,6 +69,9 @@ const ORIGIN = (() => {
 const LOCAL_AUTH_BYPASS_REQUESTED = process.env.PORTAL_LOCAL_AUTH_BYPASS === "1";
 const LOCAL_AUTH_BYPASS = LOCAL_AUTH_BYPASS_REQUESTED && !IS_PROD && isLocalPortalUrl(PUBLIC_URL);
 const LOCAL_AUTH_PRINCIPAL = process.env.PORTAL_DEV_PRINCIPAL || process.env.USER || "dev-admin";
+// qm-local: set only by a deployment that has bound the portal's published
+// port to the host loopback, so peer address is no longer the reachability gate.
+const TRUSTED_LOCAL_INGRESS = process.env.PORTAL_LOCAL_BYPASS_TRUSTED_INGRESS === "1" && LOCAL_AUTH_BYPASS;
 const DEPLOYMENTS_ENABLED = process.env.PORTAL_DEPLOYMENTS_ENABLED === "1";
 const PLAYGROUND = process.env.PORTAL_PLAYGROUND === "1";
 function playgroundIntEnv(name: string, fallback: number): number {
@@ -328,7 +331,13 @@ export function isLoopbackAddress(address: string | null | undefined): boolean {
 
 function localDevSession(req: IncomingMessage, nowMs = Date.now(), ignoreLogout = false): SessionClaims | null {
   if (!LOCAL_AUTH_BYPASS) return null;
-  if (!isLoopbackAddress(req.socket.remoteAddress)) return null;
+  // qm-local: the loopback check exists so only someone on this machine can
+  // use the bypass. When the portal runs in a container, host traffic arrives
+  // from the docker bridge gateway rather than 127.0.0.1, so the check rejects
+  // the very case the bypass is for. TRUSTED_LOCAL_INGRESS is set by the CLI
+  // only when it has also published the port to the host's loopback interface,
+  // which enforces the same "this machine only" property one layer out.
+  if (!TRUSTED_LOCAL_INGRESS && !isLoopbackAddress(req.socket.remoteAddress)) return null;
   if (!ignoreLogout && readCookie(req.headers.cookie, LOCAL_LOGOUT_COOKIE) === "1") return null;
   const now = Math.floor(nowMs / 1000);
   return { k: "session", sub: LOCAL_AUTH_PRINCIPAL, org: ORG, iat: now, exp: now + SESSION_TTL_S };

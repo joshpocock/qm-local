@@ -18,6 +18,30 @@ export function activityOf(s: CoreSession): number {
   return s.lastActivityAt ?? s.createdAt;
 }
 
+/**
+ * Which surface a session's threadRef belongs to. Lives here (rather than in sessions.ts,
+ * which imports from this module) so splitSlack and other list-partitioning helpers can use
+ * it without creating an import cycle; sessions.ts re-exports it as the one public entry
+ * point everyone else imports from.
+ */
+export function surfaceOf(s: Pick<CoreSession, "threadRef">): string {
+  if (s.threadRef.startsWith("web:")) return "web";
+  if (s.threadRef.startsWith("dm:") || s.threadRef.startsWith("ch:")) return "slack";
+  return "core";
+}
+
+/**
+ * Whether a row is a Slack conversation only its participants can read.
+ *
+ * A channel row says what it is on its own — the title is `#general` — but a DM or group DM
+ * row carries a name that looks exactly like any other chat's, so the one thing worth
+ * knowing before opening it is invisible. Slack-only on purpose: "private" is a fact about
+ * a workspace's visibility rules, and saying it about a web chat would be noise at best.
+ */
+export function isPrivateSlackRow(s: Pick<CoreSession, "threadRef" | "type">): boolean {
+  return surfaceOf(s) === "slack" && (s.type === "dm" || s.type === "group");
+}
+
 export type ChatBrowseStatus = "active" | "waiting" | "archived";
 
 export function splitPinned<T extends Pick<CoreSession, "pinned">>(sessions: readonly T[]): { pinned: T[]; rest: T[] } {
@@ -25,6 +49,40 @@ export function splitPinned<T extends Pick<CoreSession, "pinned">>(sessions: rea
   const rest: T[] = [];
   for (const s of sessions) (s.pinned ? pinned : rest).push(s);
   return { pinned, rest };
+}
+
+/**
+ * What makes a row belong under Rooms rather than Chats: a roster with someone in it.
+ * A `room` of `null` (core cleared it) or an empty roster is an ordinary chat — a room
+ * nobody is in is not a room. A brand-new room has no server session yet, so the sidebar
+ * row is stamped client-side at pick time (see `notePendingRoom`) and matches here too.
+ */
+export function isRoomSession(s: Pick<CoreSession, "room">): boolean {
+  return Boolean(s.room?.personaIds?.length);
+}
+
+/**
+ * Lifts rooms into their own section, exactly as `splitPinned` lifts pinned rows. Both
+ * halves keep the order they came in with, so the caller's recency sort still holds.
+ */
+export function splitRooms<T extends Pick<CoreSession, "room">>(sessions: readonly T[]): { rooms: T[]; rest: T[] } {
+  const rooms: T[] = [];
+  const rest: T[] = [];
+  for (const s of sessions) (isRoomSession(s) ? rooms : rest).push(s);
+  return { rooms, rest };
+}
+
+/**
+ * Lifts Slack-mirrored sessions into their own section, exactly as `splitRooms` lifts rooms.
+ * Slack sessions have their own home in the sidebar now, so they never fall through to the
+ * generic date/project buckets. Both halves keep the order they came in with, so the
+ * caller's recency sort still holds.
+ */
+export function splitSlack<T extends Pick<CoreSession, "threadRef">>(sessions: readonly T[]): { slack: T[]; rest: T[] } {
+  const slack: T[] = [];
+  const rest: T[] = [];
+  for (const s of sessions) (surfaceOf(s) === "slack" ? slack : rest).push(s);
+  return { slack, rest };
 }
 
 export function chatBrowseStatusMatches(

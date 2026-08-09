@@ -47,6 +47,7 @@ import type { ChannelPolicyStore } from "../surface-cache/channel-policy-store.t
 import type { RateLimiter } from "../ratelimit/rate-limiter.ts";
 import type { AdvisoryLock } from "../persistence/advisory-lock.ts";
 import type { SlackInstallationStore, SlackSocketAppIdReader } from "../surfaces/slack-installation.ts";
+import type { SlackBotRegistry } from "../surfaces/slack-bot-registry.ts";
 
 export interface ServerDeps {
   production?: boolean;
@@ -61,7 +62,14 @@ export interface ServerDeps {
   slackInstallation?: SlackInstallationStore;
   slackInstallationFetch?: typeof fetch;
   slackInstallationSocketAppId?: SlackSocketAppIdReader;
+  /** ADDITIONAL Slack bots beyond the singular installation above. */
+  slackBots?: SlackBotRegistry;
   slackEnvironmentState?: "absent" | "configured" | "partial";
+  /**
+   * How this deployment receives Slack events. Registry bots are Socket Mode only: http mode
+   * would need a distinct port and signing secret per bot, which nothing models today.
+   */
+  slackEventsMode?: "socket" | "http";
   oauthStateSecret?: string;
   oauthFetch?: FetchLike;
   oauthEnv?: NodeJS.ProcessEnv;

@@ -60,12 +60,35 @@ export interface Conversation {
 
 export type SessionType = "dm" | "channel" | "group";
 
+/**
+ * Roster for an agent room. `room == null` on a session means "behaves exactly as it
+ * always has" — every room-only code path is keyed off this being present.
+ */
+export interface RoomConfig {
+  /** persona ids, in the order they speak; a room may hold as many as you like */
+  personaIds: string[];
+  /** how many times the roster goes round; an integer in 1..ROOM_MAX_ROUNDS */
+  rounds: number;
+}
+
+/** Upper bound on `RoomConfig.rounds`; valid values are the integers 1..ROOM_MAX_ROUNDS. */
+export const ROOM_MAX_ROUNDS = 20;
+
+/**
+ * Rounds a room gets when nobody chose a number — a room the client opened with the
+ * default, and the room an `@tag` promotes an ordinary session into. One round means
+ * everybody on the roster speaks once, which is the least surprising thing a mention
+ * can do; the roster owner can raise it afterwards like any other room.
+ */
+export const ROOM_DEFAULT_ROUNDS = 1;
+
 export interface Session {
   id: string;
   type: SessionType;
   scopeId: ScopeId;
   threadRef: string;
   surface?: string;
+  room?: RoomConfig;
   createdAt: number;
   channelName?: string;
   title?: string | null;
@@ -398,6 +421,43 @@ export interface TurnRequest {
   inboundNotes?: string[];
   model?: string;
   harness?: string;
+  /**
+   * Set only by the panel driver: this turn is one persona speaking in a room.
+   * `continuation` means the text is the driver's nudge rather than something a human
+   * wrote, so it reaches the harness but never lands in the transcript as a user entry.
+   * `rosterIds` carries the panel's full membership so the roster block is right even on
+   * the very first turn, before the session (and its stored room config) exists.
+   * `round`/`rounds` are the panel's budget, so the persona can pace itself toward a
+   * conclusion instead of deferring forever; both absent means "say nothing about rounds".
+   */
+  panel?: {
+    persona: { id: string; name: string };
+    continuation: boolean;
+    rosterIds?: string[];
+    round?: number;
+    rounds?: number;
+  };
+  /**
+   * A room roster arriving with the message itself — used for the first message of a new
+   * room, where there is no session yet for PUT /v1/sessions/:id/room to target. Validated
+   * like the route (shape, visibility, enabled) and persisted once the session exists.
+   */
+  room?: { personaIds: string[]; rounds: number };
+  /**
+   * Reply in thread: the `seq` of the message in this conversation that this turn answers,
+   * as a client would name it — Slack's "reply in thread", pointed at any `user` or
+   * `assistant` entry in the thread rather than only at its first message.
+   *
+   * `App.turn` validates it (the session must exist and hold an entry with that seq, of one
+   * of those two types) and REPLACES it with the thread ROOT it resolves to before the
+   * orchestrator ever sees it, so everything downstream reads a root and never a raw
+   * client-supplied ref. The turn's own `user` entry is then written with
+   * `parentSeq` = that root, and the reply threads under the user entry as it always does —
+   * `user(root) ← user(reply) ← assistant(answer)`.
+   *
+   * Absent (the normal case) nothing changes: user entries stay linear.
+   */
+  replyToSeq?: number;
   thinkingLevel?: string;
   fastMode?: boolean;
   readOnly?: boolean;

@@ -27,6 +27,7 @@ import { createResolutionService } from "./resolution/resolution-service.ts";
 import { createAclStore, type AclStore } from "./acl/acl-store.ts";
 import { createPostgresGrantStore } from "./acl/postgres-grant-store.ts";
 import { createSkillStore, type SkillStore, type Skill } from "./skills/skill-store.ts";
+import { createAgentPersonaStore, type AgentPersona, type AgentPersonaStore } from "./agents/persona-store.ts";
 import { createSkillPackStore, type SkillPack } from "./skills/skill-pack-store.ts";
 import { createSkillBundleStore, type SkillBundle, type SkillBundleStore } from "./skills/skill-bundle-store.ts";
 import { createGitFetcher, resolvePackAuth, type SkillPackFetcher } from "./skills/pack-fetcher.ts";
@@ -165,6 +166,7 @@ import { createMockHarness } from "./harness/mock-harness.ts";
 import { createOpenCodeHarness, openCodeHarnessConfigOptions } from "./harness/opencode-harness.ts";
 import { createCodexHarness, codexHarnessConfigOptions } from "./harness/codex-harness.ts";
 import { createClaudeHarness, claudeHarnessConfigOptions } from "./harness/claude-harness.ts";
+import { createAcpHarness, acpHarnessConfigOptions } from "./harness/acp-harness.ts";
 import { createPiHarness, piHarnessConfigOptions } from "./harness/pi-harness.ts";
 import { createHarnessRouter, resolveRuntimeChoiceDurable } from "./harness/harness-router.ts";
 import type { Harness } from "./harness/harness.ts";
@@ -265,6 +267,11 @@ import { createPostgresMetricsSink } from "./admin/postgres-metrics-sink.ts";
 import { errMessage, swallowAs } from "./util/errors.ts";
 import { sleep } from "./util/async.ts";
 import { createSlackInstallationStore, type SlackInstallationStore } from "./surfaces/slack-installation.ts";
+import {
+  createSlackBotRegistry,
+  type SlackBotRegistry,
+  type StoredSlackBot,
+} from "./surfaces/slack-bot-registry.ts";
 
 export interface Runtime {
   start(): void;
@@ -313,6 +320,8 @@ export interface BuiltApp {
   config: ScopedConfigStore;
   connectorTokens: ConnectorTokenStore;
   slackInstallation: SlackInstallationStore;
+  /** ADDITIONAL Slack bots beyond `slackInstallation`, which stays the default one. */
+  slackBots: SlackBotRegistry;
   resolveClient: OAuthClientResolver;
   consentLinks: ConsentLinkStore;
   secretDrops: SecretDropStore;
@@ -320,6 +329,7 @@ export interface BuiltApp {
   modelCredentials: ModelCredentialStore;
   acl: AclStore;
   skills: SkillStore;
+  personas: AgentPersonaStore;
   skillBundles: SkillBundleStore;
   skillFetcher: SkillPackFetcher;
   auditLog: AuditLog;
@@ -440,6 +450,9 @@ export function buildApp(
     backing: artifactMap<Skill>("skills"),
     ...(config.skillSigningSecret ? { signingSecret: config.skillSigningSecret } : {}),
   });
+  const personas: AgentPersonaStore = createAgentPersonaStore({
+    backing: artifactMap<AgentPersona>("agent_personas"),
+  });
   const skillPacks = createSkillPackStore({ backing: artifactMap<SkillPack>("skill_packs") });
   const skillBundles = createSkillBundleStore({ backing: artifactMap<SkillBundle>("skill_bundles") });
   const livenessCache = createLivenessCache(artifactMap<ScopeLivenessRecord>("credential_liveness"));
@@ -447,10 +460,16 @@ export function buildApp(
     resets: artifactMap<DeviceFlowCutoverReset>("device_flow_cutover_resets"),
   });
   const connectorStatusCache = createConnectorStatusCache(artifactMap<ConnectorStatusRecord>("connector_status"));
+  const slackSecretKey = config.connectorSecretKey ?? randomBytes(32);
   const slackInstallation = createSlackInstallationStore(
     config.orgId,
     artifactMap("slack_installation"),
-    config.connectorSecretKey ?? randomBytes(32),
+    slackSecretKey,
+  );
+  const slackBots = createSlackBotRegistry(
+    config.orgId,
+    artifactMap<StoredSlackBot>("slack_bot_registry"),
+    slackSecretKey,
   );
   const deploymentLayer = config.deploymentLayerDir
     ? loadDeploymentLayer(config.deploymentLayerDir)
@@ -709,6 +728,7 @@ export function buildApp(
     ["opencode", createOpenCodeHarness({ ...openCodeHarnessConfigOptions(config), signals: runSignals, tasks })],
     ["codex", createCodexHarness({ ...codexHarnessConfigOptions(config), signals: runSignals, tasks })],
     ["claude", createClaudeHarness({ ...claudeHarnessConfigOptions(config), signals: runSignals, tasks })],
+    ["acp", createAcpHarness(acpHarnessConfigOptions(config))],
     ["mock", createMockHarness()],
   ]);
   const fallbackHarness = config.harness as HarnessId;
@@ -916,6 +936,7 @@ export function buildApp(
     ...(config.publicWebUrl ? { publicWebUrl: config.publicWebUrl } : {}),
     memoryPolicy: { recall: config.memoryRecall, capture: config.memoryCapture },
     memoryStrategy,
+    ...(config.agentRooms ? { personas } : {}),
     skills,
     skillBundles,
     skillsReady,
@@ -1053,6 +1074,7 @@ export function buildApp(
     acl,
     admin,
     skills,
+    personas,
     skillPacks,
     skillFetcher,
     skillBundles,
@@ -1378,6 +1400,7 @@ export function buildApp(
     config: configStore,
     connectorTokens,
     slackInstallation,
+    slackBots,
     resolveClient,
     consentLinks,
     secretDrops,
@@ -1385,6 +1408,7 @@ export function buildApp(
     modelCredentials,
     acl,
     skills,
+    personas,
     skillBundles,
     skillFetcher,
     auditLog,

@@ -148,6 +148,42 @@ test("pg session store: one-per-thread, TTL/fenced lease, monotonic log, visibil
   );
 });
 
+test("pg session store: an explicit parentSeq threads an entry; omitting it keeps seq - 1", { skip }, async () => {
+  const s = createPostgresSessionStore(URL!);
+  const scope = scopeId("personal", "thread-parent");
+  const session = await s.getOrCreateByThread("pg-thread-parent", "dm", scope);
+  const { lease } = await s.acquireLease(session.id);
+  assert.ok(lease);
+
+  const user = await s.append(lease, { type: "user", payload: { text: "hi" }, scopeLabel: scope });
+  const filler = await s.append(lease, { type: "tool_call", payload: { tool: "x" }, scopeLabel: scope });
+  const threaded = await s.append(lease, {
+    type: "assistant",
+    payload: { text: "a" },
+    scopeLabel: scope,
+    parentSeq: user.seq,
+  });
+  const linear = await s.append(lease, { type: "assistant", payload: { text: "b" }, scopeLabel: scope });
+  const rooted = await s.append(lease, {
+    type: "assistant",
+    payload: { text: "c" },
+    scopeLabel: scope,
+    parentSeq: null,
+  });
+
+  assert.equal(filler.parentSeq, user.seq, "no parent given → the linear chain");
+  assert.equal(threaded.parentSeq, user.seq, "an explicit parent is honored, skipping the entry in between");
+  assert.equal(linear.parentSeq, threaded.seq, "omitting it again falls straight back to seq - 1");
+  assert.equal(rooted.parentSeq, null, "an explicit null is a parent, not an omission");
+
+  assert.deepEqual(
+    (await s.getEntries(session.id)).map((e) => e.parentSeq),
+    [null, user.seq, user.seq, threaded.seq, null],
+    "and it round-trips out of parent_seq",
+  );
+  await s.releaseLease(lease);
+});
+
 test("pg lease: a lock taken by an older instance still blocks, and reports what it can", { skip }, async () => {
   const s = createPostgresSessionStore(URL!, { leaseTtlMs: 60_000 });
   const scope = scopeId("personal", "legacy-lease");

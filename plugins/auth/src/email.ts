@@ -65,7 +65,36 @@ function smtpMailer(cfg: AuthConfig): Mailer {
   };
 }
 
+/**
+ * qm-local: prints the sign-in link to stdout instead of sending mail, so a
+ * local test drive can sign in with no email provider wired up at all. The
+ * config layer refuses this transport when NODE_ENV=production.
+ */
+function consoleMailer(): Mailer {
+  return {
+    async send(message) {
+      const link = message.text.match(/https?:\/\/\S+/)?.[0] ?? "(no link found in message)";
+      process.stdout.write(
+        [
+          "",
+          "==================== QM SIGN-IN LINK ====================",
+          `to:   ${message.to}`,
+          `open: ${link}`,
+          "(AUTH_EMAIL_TRANSPORT=console — printed, not emailed)",
+          "=========================================================",
+          "",
+        ].join("\n"),
+      );
+      return "console";
+    },
+    async verify() {
+      return "console transport: sign-in links are printed to this service's log";
+    },
+  };
+}
+
 export function mailerFor(cfg: AuthConfig): Mailer {
+  if (cfg.transport === "console") return consoleMailer();
   return cfg.transport === "smtp" ? smtpMailer(cfg) : resendMailer(cfg);
 }
 

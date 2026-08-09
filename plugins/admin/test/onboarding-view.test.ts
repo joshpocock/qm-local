@@ -43,3 +43,7 @@ test("?view=onboarding resolves to the onboarding view", () => {
 test("unknown views still fall back to the default view", () => {
   assert.equal(resolveView("/admin/no-such-view", ""), "history");
 });
+
+test("/admin/connectors resolves to the connectors view (home of the Slack bot + Slack bots cards)", () => {
+  assert.equal(resolveView("/admin/connectors", ""), "connectors");
+});

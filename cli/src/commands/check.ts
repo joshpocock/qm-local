@@ -31,7 +31,7 @@ export function runChecks(
   const provider = hostingProvider(config.target);
   configErrors.push(...provider.validateConfig(config, plugins));
   if (provider.requiresSandboxApp && !config.sandbox?.app?.trim()) {
-    configError("contract sandbox.app: a Fly agent-computer app is required for docker and fly targets");
+    configError("contract sandbox.app: a Fly agent-computer app is required for the fly target");
   }
   for (const skill of config.skills) {
     const path = resolve(configDir, skill);

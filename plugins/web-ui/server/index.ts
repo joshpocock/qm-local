@@ -171,6 +171,44 @@ function sendHtml(res: ServerResponse, status: number, html: string): void {
   res.end(html);
 }
 
+const AGENT_STRING_FIELDS = ["name", "color", "glyph", "harnessId", "modelId", "instructions"] as const;
+
+/**
+ * Whitelists the persona fields the browser may set. `principalId` is deliberately not
+ * copyable — the relay always binds the signed-in user. On create the runtime fields are
+ * required by core, so they are passed through even when blank and core answers 400;
+ * on update only present fields are forwarded so a patch stays a patch.
+ */
+function agentDraftFromBody(body: Record<string, unknown>, create: boolean): Record<string, unknown> {
+  const draft: Record<string, unknown> = {};
+  for (const field of AGENT_STRING_FIELDS) {
+    if (typeof body[field] === "string") draft[field] = body[field];
+  }
+  if (typeof body.enabled === "boolean") draft.enabled = body.enabled;
+  if (create && typeof body.scopeId === "string") draft.scopeId = body.scopeId;
+  return draft;
+}
+
+const ROOM_MAX_PERSONAS = 4;
+
+/**
+ * Normalises a room roster. Returns `null` to clear the room, a config to set it, or
+ * `undefined` when the body is neither (the route answers 400). Core validates again —
+ * this only keeps obvious junk off the wire.
+ */
+function roomFromBody(body: { room?: unknown }): { personaIds: string[]; rounds: number } | null | undefined {
+  if (body.room === null) return null;
+  if (typeof body.room !== "object" || body.room === null) return undefined;
+  const room = body.room as { personaIds?: unknown; rounds?: unknown };
+  if (!Array.isArray(room.personaIds)) return undefined;
+  const personaIds = room.personaIds.filter((id): id is string => typeof id === "string" && id.length > 0);
+  if (!personaIds.length || personaIds.length > ROOM_MAX_PERSONAS) return undefined;
+  if (new Set(personaIds).size !== personaIds.length) return undefined;
+  const rounds = room.rounds;
+  if (rounds !== 1 && rounds !== 2 && rounds !== 3) return undefined;
+  return { personaIds, rounds };
+}
+
 const SSE_CORE_POLL_MS = 100;
 const SSE_STALE_POLL_MS = 1_000;
 const SSE_IDLE_MS = 6 * 60_000;
@@ -943,6 +981,79 @@ const routeRequest = async (req: IncomingMessage, res: ServerResponse) => {
       return relay(res, r);
     }
 
+    // Agent personas. A straight relay of core's /v1/agents, which is only mounted when
+    // core runs with QM_AGENT_ROOMS=1 — with the flag off these calls come back 404 and
+    // the Agents page renders its "not enabled on this deployment" card.
+    if (method === "GET" && path === "/api/agents") {
+      const r = await coreFetch("GET", `/v1/agents?principalId=${encodeURIComponent(user)}`);
+      return relay(res, r);
+    }
+
+    if (method === "GET" && path.startsWith("/api/agents/")) {
+      const id = decodeURIComponent(path.slice("/api/agents/".length));
+      const r = await coreFetch("GET", `/v1/agents/${encodeURIComponent(id)}?principalId=${encodeURIComponent(user)}`);
+      return relay(res, r);
+    }
+
+    if (method === "POST" && path === "/api/agents") {
+      let draft: Record<string, unknown>;
+      try {
+        draft = agentDraftFromBody(JSON.parse((await readBody(req)) || "{}") as Record<string, unknown>, true);
+      } catch (e) {
+        if (e instanceof PayloadTooLargeError) throw e;
+        return json(res, 400, { error: "bad_request" });
+      }
+      const r = await coreFetch("POST", "/v1/agents", JSON.stringify({ principalId: user, ...draft }));
+      return relay(res, r);
+    }
+
+    if (method === "PUT" && path.startsWith("/api/agents/")) {
+      const id = decodeURIComponent(path.slice("/api/agents/".length));
+      let patch: Record<string, unknown>;
+      try {
+        patch = agentDraftFromBody(JSON.parse((await readBody(req)) || "{}") as Record<string, unknown>, false);
+      } catch (e) {
+        if (e instanceof PayloadTooLargeError) throw e;
+        return json(res, 400, { error: "bad_request" });
+      }
+      const r = await coreFetch(
+        "PUT",
+        `/v1/agents/${encodeURIComponent(id)}`,
+        JSON.stringify({ principalId: user, ...patch }),
+      );
+      return relay(res, r);
+    }
+
+    if (method === "DELETE" && path.startsWith("/api/agents/")) {
+      const id = decodeURIComponent(path.slice("/api/agents/".length));
+      const r = await coreFetch(
+        "DELETE",
+        `/v1/agents/${encodeURIComponent(id)}`,
+        JSON.stringify({ principalId: user }),
+      );
+      return relay(res, r);
+    }
+
+    if (method === "PUT" && path.startsWith("/api/sessions/") && path.endsWith("/room")) {
+      const id = decodeURIComponent(path.slice("/api/sessions/".length, -"/room".length));
+      let room: unknown;
+      try {
+        room = roomFromBody(JSON.parse((await readBody(req)) || "{}") as { room?: unknown });
+      } catch (e) {
+        if (e instanceof PayloadTooLargeError) throw e;
+        return json(res, 400, { error: "bad_request" });
+      }
+      if (room === undefined) {
+        return json(res, 400, { error: "bad_request", message: "room must be a roster config or null" });
+      }
+      const r = await coreFetch(
+        "PUT",
+        `/v1/sessions/${encodeURIComponent(id)}/room`,
+        JSON.stringify({ principalId: user, room }),
+      );
+      return relay(res, r);
+    }
+
     if (method === "GET" && path === "/api/skills") {
       const qs = new URLSearchParams({ principalId: user });
       if (url.searchParams.get("includeShadowed") === "1") qs.set("includeShadowed", "1");
@@ -1449,6 +1560,9 @@ const routeRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const attachments: CoreAttachment[] = [];
       let approval: { requestId: string; approved: boolean; scope?: string } | undefined;
       let proactiveOpener = false;
+      let room: { personaIds: string[]; rounds: number } | undefined;
+      let badRoom = false;
+      let replyToSeq: number | undefined;
       try {
         const p = JSON.parse(await readBody(req));
         text = String(p.text ?? "");
@@ -1470,6 +1584,20 @@ const routeRequest = async (req: IncomingMessage, res: ServerResponse) => {
         if (typeof p.thinkingLevel === "string") thinkingLevel = p.thinkingLevel;
         if (typeof p.fastMode === "boolean") fastMode = p.fastMode;
         if (typeof p.timezone === "string" && p.timezone.trim()) timezone = p.timezone.trim().slice(0, 64);
+        // Reply in thread: the seq of the message this one answers. Only the shape is checked
+        // here — whether that seq names a message anybody may reply to is core's call, and it
+        // refuses the turn with a reason the composer shows. A malformed one is dropped rather
+        // than refused: it can only come from a client bug, and the message itself is fine.
+        if (typeof p.replyToSeq === "number" && Number.isInteger(p.replyToSeq) && p.replyToSeq >= 0) {
+          replyToSeq = p.replyToSeq;
+        }
+        // A roster on the first message of a brand-new room. Same normaliser the PUT route
+        // uses; `null` is meaningless here (there is no roster to clear yet), so it is junk.
+        if (p.room !== undefined) {
+          const normalised = roomFromBody(p as { room?: unknown });
+          if (normalised) room = normalised;
+          else badRoom = true;
+        }
         if (Array.isArray(p.attachments)) {
           for (const raw of p.attachments as unknown[]) {
             if (!raw || typeof raw !== "object") continue;
@@ -1485,6 +1613,12 @@ const routeRequest = async (req: IncomingMessage, res: ServerResponse) => {
         }
       } catch (e) {
         if (e instanceof PayloadTooLargeError) throw e;
+      }
+      if (badRoom) {
+        return json(res, 400, {
+          error: "bad_request",
+          message: `room must be a roster of 1-${ROOM_MAX_PERSONAS} unique agents over 1-3 rounds`,
+        });
       }
       if (!text.trim() && attachments.length === 0 && !approval && !proactiveOpener)
         return json(res, 400, { error: "empty message" });
@@ -1520,6 +1654,8 @@ const routeRequest = async (req: IncomingMessage, res: ServerResponse) => {
         ...(attachments.length ? { attachments } : {}),
         ...(approval ? { approval } : {}),
         ...(proactiveOpener ? { proactiveOpener: true } : {}),
+        ...(room ? { room } : {}),
+        ...(replyToSeq !== undefined ? { replyToSeq } : {}),
       };
       return postTurnAndMint(res, turn, user, threadRef);
     }

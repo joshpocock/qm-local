@@ -22,6 +22,36 @@ export function threadHasBotStake(
   });
 }
 
+/**
+ * Slack identities belonging to OTHER qm bots in this process (multi-bot deployments, see
+ * docs/slack-multi-bot.md). A thread reply from a third-party bot — GitHub, PagerDuty — is real
+ * input and still dispatches; a reply from a sibling qm bot is not, and left alone it would loop:
+ * both bots have stake in the thread, so each would answer the other forever.
+ *
+ * Empty with a single bot beyond that bot's own ids, which `shouldProcessMessage` already
+ * excluded, so nothing about single-bot behaviour changes.
+ */
+const siblingBotIds = new Set<string>();
+
+/** Registers one running plugin instance's identity; the returned function deregisters it. */
+export function registerSlackBotIdentity(ids: { botUserId?: string; ownBotId?: string }): () => void {
+  const added: string[] = [];
+  for (const id of [ids.botUserId, ids.ownBotId]) {
+    if (id && !siblingBotIds.has(id)) {
+      siblingBotIds.add(id);
+      added.push(id);
+    }
+  }
+  return () => {
+    for (const id of added) siblingBotIds.delete(id);
+  };
+}
+
+/** Test seam. */
+export function registeredSlackBotIdentities(): ReadonlySet<string> {
+  return siblingBotIds;
+}
+
 export function shouldProcessMessage(
   m: { subtype?: string; bot_id?: string; user?: string },
   botUserId: string,
@@ -29,6 +59,8 @@ export function shouldProcessMessage(
 ): boolean {
   if (botUserId && m.user === botUserId) return false;
   if (ownBotId && m.bot_id === ownBotId) return false;
+  if (m.user && siblingBotIds.has(String(m.user))) return false;
+  if (m.bot_id && siblingBotIds.has(String(m.bot_id))) return false;
   if (m.subtype && m.subtype !== "file_share" && m.subtype !== "thread_broadcast" && m.subtype !== "bot_message")
     return false;
   return true;

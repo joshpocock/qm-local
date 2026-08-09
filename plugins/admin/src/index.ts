@@ -27,7 +27,13 @@ function signedHeaders(method: string, corePath: string, rawBody: string): Recor
 const BASE_HTML = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), "../public/index.html"),
   "utf8",
-).replaceAll("__ADMIN_BASE__", () => ADMIN_BASE_PATH);
+)
+  // The HTML parser normalizes CRLF to LF before CSP hashes the inline
+  // script, so a CRLF checkout (e.g. git autocrlf on Windows) makes the
+  // browser-computed hash diverge from ours and the script is silently
+  // blocked. Hash and serve the LF form so the two always agree.
+  .replaceAll("\r\n", "\n")
+  .replaceAll("__ADMIN_BASE__", () => ADMIN_BASE_PATH);
 const ADMIN_SCRIPT = BASE_HTML.match(/<script>([\s\S]*?)<\/script>/)?.[1] ?? "";
 const ADMIN_CSP = [
   "default-src 'self'",
@@ -266,6 +272,7 @@ const WRITES = new Map<string, string[]>([
   ["skill-packs", ["POST", "PATCH", "DELETE"]],
   ["users", ["PUT", "POST"]],
   ["slack-installation", ["PUT", "DELETE"]],
+  ["slack-bots", ["POST", "PUT", "DELETE"]],
   ["model-providers", ["PUT", "DELETE"]],
 ]);
 
@@ -290,6 +297,7 @@ const READS = [
   "ambient-judgments",
   "ack-emoji-picks",
   "slack-installation",
+  "slack-bots",
   "model-providers",
 ];
 

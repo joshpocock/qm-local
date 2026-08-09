@@ -28,7 +28,7 @@ export interface Config {
   orgId: string;
   sessionStore: "memory" | "postgres";
   databaseUrl?: string;
-  harness: "mock" | "pi" | "opencode" | "codex" | "claude";
+  harness: "mock" | "pi" | "opencode" | "codex" | "claude" | "acp";
   securityPosture: SecurityPosture;
   sandboxBackend: "aws" | "local" | "sprites";
   sandboxSecondaryBackend?: "aws" | "local" | "sprites";
@@ -43,6 +43,11 @@ export interface Config {
   claudeModel?: string;
   claudeBinPath?: string;
   claudeProcessEnv: NodeJS.ProcessEnv;
+  acpModel?: string;
+  acpAgentCmd?: string;
+  acpAgentArgs: string[];
+  acpPermissionMode: "auto" | "deny";
+  acpProcessEnv: NodeJS.ProcessEnv;
   detectModelId?: string;
   titleModelId?: string;
   judgeModelId?: string;
@@ -137,6 +142,7 @@ export interface Config {
   sharedOwnerAuthIsolation: boolean;
   surfaceDebugFooter: boolean;
   eagerProvisionEnabled: boolean;
+  agentRooms: boolean;
   awsSandbox: AwsSandboxEnv;
   localSandbox: LocalSandboxEnv;
   spritesSandbox: SpritesSandboxEnv;
@@ -144,6 +150,7 @@ export interface Config {
 }
 
 export function configuredModelForHarness(config: Config, harness: string): string | undefined {
+  if (harness === "acp") return config.acpModel;
   if (harness === "codex") return config.codexModel;
   if (harness === "claude") return config.claudeModel;
   if (harness === "opencode") return config.opencodeModel;
@@ -421,6 +428,15 @@ export function boolEnv(value: string | undefined): boolean | undefined {
   return undefined;
 }
 
+/**
+ * Agent rooms (multi-persona conversations) are off until an operator opts in with
+ * QM_AGENT_ROOMS=1. The route table reads this directly because it is built before
+ * any Config exists; loadConfig reuses it so both agree on what "on" means.
+ */
+export function agentRoomsEnabled(env?: NodeJS.ProcessEnv): boolean {
+  return boolEnv((env ?? process.env).QM_AGENT_ROOMS) === true;
+}
+
 export function numEnv(value: string | undefined): number | undefined {
   if (value === undefined || value.trim() === "") return undefined;
   const n = Number(value);
@@ -464,11 +480,25 @@ function orgBrandingFromEnv(env: NodeJS.ProcessEnv): Config["brandingDefault"] {
 function harnessEnvStrict(value: string | undefined): Config["harness"] {
   if (value === undefined || value.trim() === "") return "mock";
   const harness = value.trim();
-  if (harness === "mock" || harness === "pi" || harness === "opencode" || harness === "codex" || harness === "claude")
+  if (
+    harness === "mock" ||
+    harness === "pi" ||
+    harness === "opencode" ||
+    harness === "codex" ||
+    harness === "claude" ||
+    harness === "acp"
+  )
     return harness;
   throw new Error(
-    `HARNESS=${JSON.stringify(value)} is not recognized — use mock, pi, opencode, codex, or claude, or unset it.`,
+    `HARNESS=${JSON.stringify(value)} is not recognized — use mock, pi, opencode, codex, claude, or acp, or unset it.`,
   );
+}
+
+function acpPermissionModeEnvStrict(value: string | undefined): Config["acpPermissionMode"] {
+  if (value === undefined || value.trim() === "") return "auto";
+  const mode = value.trim();
+  if (mode === "auto" || mode === "deny") return mode;
+  throw new Error(`ACP_PERMISSION_MODE=${JSON.stringify(value)} is not recognized — use auto or deny, or unset it.`);
 }
 
 function sandboxBackendEnvStrict(value: string | undefined, name = "SANDBOX_BACKEND"): Config["sandboxBackend"] {
@@ -555,6 +585,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (missingSecrets.length) {
     throw new Error(`missing or insecure required core secrets: ${missingSecrets.join(", ")}`);
   }
+  const harness = harnessEnvStrict(env.HARNESS);
+  if (harness === "acp" && !env.ACP_AGENT_CMD?.trim()) {
+    throw new Error("HARNESS=acp requires a non-empty ACP_AGENT_CMD");
+  }
   const modelProvider = modelProviderEnvStrict(env);
   for (const key of ["SESSION_STORE", "RUN_STORE", "ARTIFACT_STORE"] as const) {
     if (env[key] === "sqlite") {
@@ -565,7 +599,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       );
     }
   }
-  if (env.NODE_ENV === "production" && harnessEnvStrict(env.HARNESS) === "mock") {
+  if (env.NODE_ENV === "production" && harness === "mock") {
     console.warn(
       `[config] HARNESS is ${env.HARNESS?.trim() ? '"mock"' : "unset, which means mock"} in production — this deployment answers every message with canned text and calls no model provider. Set HARNESS=pi to run real agent turns.`,
     );
@@ -652,6 +686,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       "OPENAI_API_KEY",
       "OPENAI_BASE_URL",
       "CODEX_ACCESS_TOKEN",
+      // qm-local: reuse an existing `codex login` (see codexSubscriptionAuth).
+      "CODEX_AUTH_JSON",
+      "CODEX_AUTH_JSON_B64",
+      "CODEX_AUTH_FILE",
       "HOME",
       "CODEX_HOME",
     ].flatMap((name) => (env[name] === undefined ? [] : [[name, env[name]]])),
@@ -673,6 +711,28 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       "ANTHROPIC_AUTH_TOKEN",
       "ANTHROPIC_BASE_URL",
       "CLAUDE_CODE_OAUTH_TOKEN",
+      // qm-local: reuse an existing Claude Code login (see prepareClaudeHome).
+      "CLAUDE_CREDENTIALS_FILE",
+      "CLAUDE_CREDENTIALS_JSON",
+    ].flatMap((name) => (env[name] === undefined ? [] : [[name, env[name]]])),
+  ) as NodeJS.ProcessEnv;
+  const acpProcessEnv = Object.fromEntries(
+    [
+      "PATH",
+      "TMPDIR",
+      "LANG",
+      "LC_ALL",
+      "SSL_CERT_FILE",
+      "SSL_CERT_DIR",
+      "NODE_EXTRA_CA_CERTS",
+      "HTTP_PROXY",
+      "HTTPS_PROXY",
+      "NO_PROXY",
+      "ALL_PROXY",
+      "CLAUDE_CODE_OAUTH_TOKEN",
+      "ANTHROPIC_API_KEY",
+      "OPENAI_API_KEY",
+      "GEMINI_API_KEY",
     ].flatMap((name) => (env[name] === undefined ? [] : [[name, env[name]]])),
   ) as NodeJS.ProcessEnv;
   const turnWallClockMs =
@@ -689,7 +749,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     orgId: env.ORG_ID ?? DEFAULT_ORG_ID,
     sessionStore: env.SESSION_STORE === "postgres" ? "postgres" : "memory",
     ...(env.DATABASE_URL ? { databaseUrl: env.DATABASE_URL } : {}),
-    harness: harnessEnvStrict(env.HARNESS),
+    harness,
     securityPosture: securityPostureEnvStrict(env.HARNESS_SECURITY_POSTURE),
     securityScreenBackend,
     ...(securityScreenBackend === "proxy"
@@ -721,6 +781,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ...(env.CLAUDE_MODEL ? { claudeModel: env.CLAUDE_MODEL } : {}),
     ...(env.CLAUDE_BIN ? { claudeBinPath: env.CLAUDE_BIN } : {}),
     claudeProcessEnv,
+    ...(env.ACP_MODEL ? { acpModel: env.ACP_MODEL } : {}),
+    ...(env.ACP_AGENT_CMD?.trim() ? { acpAgentCmd: env.ACP_AGENT_CMD.trim() } : {}),
+    acpAgentArgs: env.ACP_AGENT_ARGS?.trim() ? env.ACP_AGENT_ARGS.trim().split(/\s+/) : [],
+    acpPermissionMode: acpPermissionModeEnvStrict(env.ACP_PERMISSION_MODE),
+    acpProcessEnv,
     ...(env.PI_DETECT_MODEL ? { detectModelId: env.PI_DETECT_MODEL } : {}),
     ...(env.PI_TITLE_MODEL ? { titleModelId: env.PI_TITLE_MODEL } : {}),
     ...(env.PI_JUDGE_MODEL ? { judgeModelId: env.PI_JUDGE_MODEL } : {}),
@@ -847,6 +912,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     sharedOwnerAuthIsolation: boolEnvStrict("SHARED_OWNER_AUTH_ISOLATION", env.SHARED_OWNER_AUTH_ISOLATION) ?? false,
     surfaceDebugFooter: boolEnvStrict("SURFACE_DEBUG_FOOTER", env.SURFACE_DEBUG_FOOTER) ?? false,
     eagerProvisionEnabled: boolEnvStrict("EAGER_PROVISION", env.EAGER_PROVISION) ?? false,
+    agentRooms: agentRoomsEnabled(env),
     awsSandbox: awsSandboxEnv(env),
     localSandbox: localSandboxEnv(env),
     spritesSandbox: spritesSandboxEnv(env),

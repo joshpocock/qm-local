@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { sanitizeTitle, TITLE_GENERATION_PROMPT } from "./pi-harness.ts";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -16,7 +16,8 @@ import { parseSecurityScreenVerdict, SECURITY_SCREEN_SYSTEM_PROMPT } from "../se
 import { CodexAppServer, CodexRpcError } from "./codex-app-server.ts";
 import { defineHarness, type Harness, type HarnessTurnInput, type HarnessTurnResult } from "./harness.ts";
 import { coreToolOptions, createPiTools, type PiToolsOptions, type ToolContextRef } from "./pi-tools.ts";
-import { reconstructMessagesFromHistory, seedPriorTurns, type PiReplayMessage } from "./replay.ts";
+import { assistantLineLabel, reconstructMessagesFromHistory, seedPriorTurns, type PiReplayMessage } from "./replay.ts";
+import type { FoldPersona } from "./tape-fold.ts";
 
 export interface CodexHarnessOptions {
   modelId?: string | ((scope?: ScopeId) => string | undefined);
@@ -199,7 +200,10 @@ export function codexChildEnv(source: NodeJS.ProcessEnv, jail: string): NodeJS.P
 export function prepareCodexHome(source: NodeJS.ProcessEnv, jail: string): string {
   const target = join(jail, "codex-home");
   mkdirSync(target, { recursive: true });
-  if (source.OPENAI_API_KEY) {
+  const subscription = codexSubscriptionAuth(source);
+  if (subscription) {
+    writeFileSync(join(target, "auth.json"), subscription, { mode: 0o600 });
+  } else if (source.OPENAI_API_KEY) {
     writeFileSync(
       join(target, "auth.json"),
       JSON.stringify({ auth_mode: "apikey", OPENAI_API_KEY: source.OPENAI_API_KEY }),
@@ -207,6 +211,44 @@ export function prepareCodexHome(source: NodeJS.ProcessEnv, jail: string): strin
     );
   }
   return target;
+}
+
+/**
+ * qm-local: run Codex on the operator's own ChatGPT subscription instead of
+ * API-key billing. CODEX_AUTH_JSON carries the verbatim contents of an
+ * auth.json minted by `codex login` on the operator's machine
+ * (~/.codex/auth.json); CODEX_AUTH_JSON_B64 is the same, base64-encoded for
+ * transports that mangle raw JSON. When either is set it wins over
+ * OPENAI_API_KEY. The subscription belongs to one person: this is for an
+ * operator's own instance, not for serving other users' turns.
+ *
+ * Known limit: the Codex CLI refreshes tokens inside auth.json as they age,
+ * and a fresh jail discards that refresh after each turn, so a long-lived
+ * deployment needs the env value re-minted when the refresh token expires.
+ */
+export function codexSubscriptionAuth(source: NodeJS.ProcessEnv): string | undefined {
+  let raw =
+    source.CODEX_AUTH_JSON ??
+    (source.CODEX_AUTH_JSON_B64 ? Buffer.from(source.CODEX_AUTH_JSON_B64, "base64").toString("utf8") : undefined);
+  const file = source.CODEX_AUTH_FILE?.trim();
+  if (raw === undefined && file) {
+    try {
+      raw = readFileSync(file, "utf8");
+    } catch (err) {
+      throw new Error(`CODEX_AUTH_FILE ${file} could not be read: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  if (raw === undefined || raw.trim() === "") return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`CODEX_AUTH_JSON is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("CODEX_AUTH_JSON must be a JSON object (the contents of ~/.codex/auth.json)");
+  }
+  return JSON.stringify(parsed);
 }
 
 async function transitionTask(
@@ -257,8 +299,10 @@ export function codexReplayCallId(id: string): string {
   return id.length <= 64 ? id : createHash("sha256").update(id).digest("hex");
 }
 
-function replayItems(messages: readonly PiReplayMessage[]): CodexItem[] {
+function replayItems(messages: readonly PiReplayMessage[], viewer?: FoldPersona): CodexItem[] {
   const out: CodexItem[] = [];
+  // Call ids belonging to other personas' turns: their results must be elided with them.
+  const droppedCallIds = new Set<string>();
   for (const message of messages) {
     if (message.role === "user") {
       out.push({
@@ -269,6 +313,7 @@ function replayItems(messages: readonly PiReplayMessage[]): CodexItem[] {
       continue;
     }
     if (message.role === "toolResult") {
+      if (droppedCallIds.has(message.toolCallId)) continue;
       out.push({
         type: "function_call_output",
         call_id: codexReplayCallId(message.toolCallId),
@@ -276,11 +321,34 @@ function replayItems(messages: readonly PiReplayMessage[]): CodexItem[] {
       });
       continue;
     }
+    // In a room, another persona's turn (or unattributed pre-room history) must never replay as
+    // this model's own output: present it as an incoming user message and elide its tool calls,
+    // mirroring foldTapeForPersona. Outside rooms (`viewer` unset) items are emitted exactly as
+    // before.
+    if (viewer && message.authorName !== viewer.name) {
+      const author = message.authorName ?? "Assistant";
+      const texts: string[] = [];
+      let usedTools = false;
+      for (const part of message.content) {
+        if (part.type === "text") texts.push(part.text);
+        else if (part.type === "toolCall") {
+          usedTools = true;
+          droppedCallIds.add(part.id);
+        }
+      }
+      const line = `[${author}]: ${texts.join("\n")}` + (usedTools ? `\n[${author} used tools]` : "");
+      out.push({ type: "message", role: "user", content: [{ type: "input_text", text: line }] });
+      continue;
+    }
     const text = message.content
       .filter((part) => part.type === "text")
       .map((part) => part.text)
       .join("");
-    if (text) out.push({ type: "message", role: "assistant", content: [{ type: "output_text", text }] });
+    if (text) {
+      // Own prior turns keep the assistant role; in a room they are additionally self-labelled.
+      const labelled = viewer ? `${assistantLineLabel(message.authorName, viewer)}: ${text}` : text;
+      out.push({ type: "message", role: "assistant", content: [{ type: "output_text", text: labelled }] });
+    }
     for (const part of message.content) {
       if (part.type === "toolCall")
         out.push({
@@ -643,7 +711,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
       throw error;
     }
     const threadId = started.thread.id;
-    const replay = replayItems(reconstructMessagesFromHistory(turn.history));
+    const replay = replayItems(reconstructMessagesFromHistory(turn.history), turn.persona);
     let userEntry: SessionEntry;
     try {
       if (replay.length) await awaitSetup(rt.server.request("thread/inject_items", { threadId, items: replay }));
@@ -831,7 +899,11 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
       if (reply && !terminal)
         await turn.emit({
           type: "assistant",
-          payload: { text: reply, stopped: state.stopped || undefined },
+          payload: {
+            text: reply,
+            stopped: state.stopped || undefined,
+            ...(turn.persona ? { persona: turn.persona } : {}),
+          },
           scopeLabel: turn.scopeLabel,
         });
       return {

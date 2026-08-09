@@ -10,6 +10,7 @@ import type {
 } from "../sessions/session-store.ts";
 export type { GapWork } from "../sessions/session-store.ts";
 import type { OverheardEntryPayload } from "./replay.ts";
+import type { FoldPersona } from "./tape-fold.ts";
 import type { ToolContext } from "../tools/primitives.ts";
 import type { SecurityScreenVerdict } from "../security/security-posture.ts";
 
@@ -55,6 +56,11 @@ export interface HarnessTurnInput {
   images?: HarnessImage[];
   model?: string;
   harness?: string;
+  /**
+   * Set only for agent-room turns: the persona speaking. Adapters stamp it onto the assistant
+   * tape rows (`meta.author`) and the assistant session entry payload. Unset = today's behavior.
+   */
+  persona?: FoldPersona;
   thinkingLevel?: string;
   fastMode?: boolean;
   readOnly?: boolean;

@@ -6,8 +6,10 @@ import "./marked-dedupe";
 import "@mariozechner/mini-lit/dist/MarkdownBlock.js";
 import "@mariozechner/mini-lit/dist/CodeBlock.js";
 import { html, nothing, render, type TemplateResult } from "lit";
+import { live } from "lit/directives/live.js";
 import {
   Activity,
+  ArrowUp,
   Ban,
   Brain,
   Check,
@@ -29,6 +31,7 @@ import {
   Terminal,
   Users,
   Wrench,
+  X,
   type IconNode,
 } from "lucide";
 import {
@@ -87,13 +90,36 @@ import {
   renderList,
   sessionsState,
   sessionSlackUrl,
+  sessionTitle,
   surfaceOf,
 } from "./sessions";
 import { backgroundLabel, clearWorking, conversationBackground, markWorking } from "./session-list";
 import { liveTurnThreadRef } from "./working-dot";
 import { newChatDraftKey, saveDraft, storedDraft } from "./drafts";
+import { applyPendingRoom, ensureRoomPersonas, personaAuthorChip, personaDotStack, roomRosterChips } from "./rooms";
+import {
+  defaultRoomNameFor,
+  isRoomThread,
+  personaChipFor,
+  personaRowKey,
+  roomFor,
+  type PersonaChip,
+  type RoomConfig,
+} from "./room-state";
+import {
+  dropRoomPassReplies,
+  groupRoomTranscript,
+  isUserRole,
+  threadKeyFor,
+  threadMembers,
+  UNSENT_THREAD_KEY,
+  type ThreadableMessage,
+  type TranscriptRow,
+} from "./thread-group";
+import { installMentionChips, syncMentionTargets } from "./mention-markdown";
 
 installMarkdownSanitizer();
+installMentionChips();
 
 const detachedAgents = new WeakSet<Agent>();
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -107,6 +133,19 @@ interface SettledRowKey {
   errorMessage: unknown;
   approvalDecision: unknown;
   forkable: boolean;
+  /**
+   * Room author identity, flattened to a string. The chip reads name/colour/glyph out of
+   * the persona cache, which fills in after the transcript first renders — without this
+   * in the key a settled row would keep whatever label it had when it was memoised.
+   */
+  persona: string;
+  /**
+   * The thread affordance this row carries, flattened the same way: reply count, who
+   * replied, when the last one landed, and whether it is expanded. A human turn in a room
+   * is a settled message whose *rendered* row keeps changing as its agents answer, so
+   * without this in the key it would freeze at "1 reply" for the rest of the turn.
+   */
+  thread: string;
   tpl: TemplateResult | typeof nothing;
 }
 const settledRowCache = new WeakMap<object, SettledRowKey>();
@@ -138,6 +177,7 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     rememberedContextName: null as string | null,
     liveWork: null as WorkBlock | null,
     pendingSend: null as string | null,
+    replyToSeq: null as number | null,
     normalStreamFn: null as Agent["streamFn"] | null,
     onWork: null as ((work: WorkBlock) => void) | null,
     resolvingApprovals: new Set<string>(),
@@ -149,6 +189,33 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
   let workTicker: ReturnType<typeof setInterval> | null = null;
   let revealedTailLen = 0;
   let liveWorkExpanded = false;
+  /**
+   * The one thread open in the side panel, and what has been typed into it.
+   *
+   * One at a time, keyed by the root turn's seq (see `threadKeyFor`) rather than by message
+   * identity: a seq survives the transcript being rebuilt from entries when a turn settles,
+   * so the thread the person is reading stays open across that refresh. Per-conversation —
+   * cleared on mount, along with everything typed into it.
+   *
+   * `dismissed` is the key the person last closed. It exists so that closing the panel over
+   * a thread that is still streaming stays closed: without it the same rule that opens the
+   * panel on a live turn would immediately reopen it on the next frame.
+   */
+  const threadPanel = {
+    rootSeq: null as number | null,
+    dismissed: null as number | null,
+    draft: "",
+    sending: false,
+    error: "",
+  };
+  /**
+   * Whether a turn has been taken in this conversation since it was mounted. It is what
+   * makes the newest thread open by default while its agents answer — and stay open once
+   * they are done — while a room opened cold reads as a tidy list of collapsed turns.
+   */
+  let threadsSeenLive = false;
+  /** Whether the last draw had a reply in flight, so a new one can start expanded. */
+  let liveThreadDrawn = false;
 
   function notePendingSessionOnSend(): void {
     if (!chatState.threadRef || chatState.sessionId !== null) return;
@@ -176,10 +243,22 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     chatState.contextName = null;
     chatState.normalStreamFn = null;
     chatState.onWork = null;
+    chatState.replyToSeq = null;
     chatState.resolvingApprovals.clear();
     chatState.transcriptAnchorSeq = null;
     chatState.earlierCount = 0;
     chatState.loadingEarlier = false;
+    resetThreadFolds();
+  }
+
+  function resetThreadFolds(): void {
+    threadPanel.rootSeq = null;
+    threadPanel.dismissed = null;
+    threadPanel.draft = "";
+    threadPanel.sending = false;
+    threadPanel.error = "";
+    threadsSeenLive = false;
+    liveThreadDrawn = false;
   }
 
   function resetChatState(): void {
@@ -248,6 +327,7 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     chatState.transcriptAnchorSeq = null;
     chatState.earlierCount = 0;
     chatState.loadingEarlier = false;
+    resetThreadFolds();
     chatState.host = document.createElement("div");
     chatState.host.className = "custom-chat";
 
@@ -311,6 +391,15 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
         if (agent !== chatState.agent) return;
         adoptActiveSessionFromList(agent);
         await refreshTranscriptFromEntries(agent);
+        // A turn can promote a plain chat to a room server-side (an `@mention` invite).
+        // The sessions refresh above just learned that roster, but the transcript draw can
+        // race the persona cache — warm it and repaint so mention chips land without a
+        // reload, same as the mount-time block below.
+        if (isRoomThread(threadRef)) {
+          void ensureRoomPersonas().then(() => {
+            if (chatState.agent === agent) drawActiveChat(agent);
+          });
+        }
         if (wasUnsaved && chatState.sessionId) void settleNewSessionTitle(agent, threadRef);
       });
     });
@@ -319,6 +408,13 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     container.replaceChildren(chatState.host);
     const opening = startProactiveOpenerIfNew(agent, threadRef, normalStreamFn, onWork, sessionId, scopeId, messages);
     drawActiveChat(agent, { forceScroll: true });
+    // Roster chips and transcript labels need colours and names the session read does not
+    // carry — after a reload the cache is cold, so warm it and redraw once it lands.
+    if (isRoomThread(threadRef)) {
+      void ensureRoomPersonas().then(() => {
+        if (chatState.agent === agent) drawActiveChat(agent);
+      });
+    }
     ctx.composer.focusComposerEnd();
     ctx.ensureDeliveryStream();
     if (!opening) void resumeTrackedRun(agent, threadRef, normalStreamFn, onWork);
@@ -374,6 +470,9 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
       harness,
       scopeId: chatState.scopeId,
       channelName: chatState.contextName,
+      // Set by the send path for the length of one turn (see `ChatState.replyToSeq`), so
+      // only the turn the thread composer started carries it.
+      ...(chatState.replyToSeq !== null ? { replyToSeq: chatState.replyToSeq } : {}),
     };
   }
 
@@ -572,6 +671,9 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     chatState.rememberedScopeId = match.scopeId;
     chatState.rememberedContextName = chatState.contextName;
     syncLocation();
+    // A room's roster is parked client-side until the first message creates the session;
+    // this is the first moment there is an id to attach it to.
+    void applyPendingRoom(chatState.threadRef, chatState.sessionId);
     renderList();
     drawActiveChat(agent);
   }
@@ -641,6 +743,7 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     chatState.scopeId = s.scopeId;
     syncLocation();
 
+    resetThreadFolds();
     resetBackgroundPanel();
     const host = document.createElement("div");
     host.className = "custom-chat readonly-chat";
@@ -648,7 +751,7 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
       render(
         html`
           <div class="custom-chat-shell">
-            ${chatHeader(groupDmTitle(s), surfaceOf(s), true)}
+            ${chatHeader(groupDmTitle(s), surfaceOf(s), true, s.room ?? null)}
             <div class="readonly-banner">
               ${
                 surfaceOf(s) === "slack"
@@ -849,20 +952,21 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     if (!agent || agent !== chatState.agent || !chatState.host || appState.currentView !== "chats") return;
     const messages = visibleMessages(agent);
     const isNewUser = sessionsState.list.filter((s) => s.id).length === 0;
+    const rows = messages.length ? buildTranscriptRows(agent, messages) : [];
     let messageContent: Array<TemplateResult | typeof nothing> | TemplateResult | typeof nothing = nothing;
     if (messages.length) {
-      messageContent = messages.map((m, i) =>
-        settledChatMessage(m, i, agent.state.isStreaming && m === agent.state.streamingMessage),
-      );
+      messageContent = transcriptRows(agent, messages, rows);
     } else if (isNewUser) {
       messageContent = welcomeGreeting();
     }
     const tier = ctx.density();
     const glanceTier = tier === "card" || tier === "strip" ? tier : null;
+    // A pane too narrow to hold a transcript is far too narrow to hold one beside a thread.
+    const openThread = glanceTier ? null : resolveOpenThread(agent, messages, rows);
     render(
       html`
         <div
-          class="custom-chat-shell ${ctx.composer.state.dragging ? "dragging" : ""}"
+          class="custom-chat-shell ${ctx.composer.state.dragging ? "dragging" : ""} ${openThread ? "thread-open" : ""}"
           @dragenter=${(e: DragEvent) => ctx.composer.onDragEnter(e)}
           @dragover=${(e: DragEvent) => ctx.composer.onDragOver(e)}
           @dragleave=${(e: DragEvent) => ctx.composer.onDragLeave(e)}
@@ -875,12 +979,17 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
                 </div>`
               : nothing
           }
-          ${contextBanner()}
+          ${roomBanner()} ${contextBanner()}
           ${
             glanceTier
               ? paneGlance(agent, messages, glanceTier)
               : html`<section class="chat-scroll" @scroll=${onTranscriptScroll}>
-                  <div class="message-stack ${messages.length ? "" : "empty-stack"}">
+                  <!-- data-mention-thread (MENTION_THREAD_ATTR) names the thread a chip
+                       resolves its roster from; lit needs the attribute name inline. -->
+                  <div
+                    class="message-stack ${messages.length ? "" : "empty-stack"}"
+                    data-mention-thread=${chatState.threadRef ?? ""}
+                  >
                     ${chatState.earlierCount > 0 ? earlierNotice(agent) : nothing} ${messageContent}
                     ${showStateError(messages, agent.state.errorMessage) ? html`<div class="composer-error inline">${agent.state.errorMessage}</div>` : nothing}
                   </div>
@@ -889,13 +998,18 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
           <div class="chat-bottom-dock">
             ${backgroundActivityStrip()} ${liveWorkDock(agent)} ${ctx.composer.composerForm(agent)}
           </div>
+          ${openThread ? threadPanelView(agent, messages, openThread) : nothing}
         </div>
       `,
       chatState.host,
     );
     decorateStreamingTail();
+    // Repaints mention chips when the roster changed value under a stack already on screen —
+    // the persona cache warms after the first draw, and a settled row does not re-render.
+    syncMentionTargets(chatState.host);
     ctx.composer.resizeComposer();
     scrollTranscript(opts.forceScroll);
+    if (openThread) scrollThreadPanel();
     postCurrentPaneState();
   }
 
@@ -936,6 +1050,24 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     return null;
   }
 
+  /**
+   * A room's identity in the live pane: its name, then the roster that will speak. The
+   * active transcript has no top bar of its own (only the read-only view builds one), so
+   * without this a room reads exactly like a one-agent chat until someone answers.
+   */
+  function roomBanner(): TemplateResult | typeof nothing {
+    const room = roomFor(chatState.threadRef);
+    if (!room?.personaIds.length) return nothing;
+    const row = sessionsState.list.find((s) =>
+      chatState.sessionId ? s.id === chatState.sessionId : s.threadRef === chatState.threadRef,
+    );
+    const name = row ? sessionTitle(row) : defaultRoomNameFor(room);
+    return html`<div class="room-banner">
+      <div class="room-banner-name">${icon(Users, 13)}<span>${name}</span></div>
+      ${roomRosterChips(room)}
+    </div>`;
+  }
+
   function contextBanner(): TemplateResult | typeof nothing {
     const label = sharedContextLabel(chatState.scopeId, chatState.contextName);
     if (!label) return nothing;
@@ -948,12 +1080,23 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     </div>`;
   }
 
-  function chatHeader(title: string | TemplateResult, detail: string, readOnly: boolean): TemplateResult {
+  /**
+   * `room` is passed in rather than read off `chatState`: the read-only pane clears
+   * `threadRef` before it draws, so looking the roster up here would find nothing and a
+   * room opened read-only would render as an ordinary chat.
+   */
+  function chatHeader(
+    title: string | TemplateResult,
+    detail: string,
+    readOnly: boolean,
+    room: RoomConfig | null = roomFor(chatState.threadRef),
+  ): TemplateResult {
     return html`
       <header class="chat-topbar">
         <div class="chat-heading">
           <div class="chat-title">${title}</div>
           <div class="chat-subtitle">${readOnly ? "Read-only" : detail}</div>
+          ${roomRosterChips(room)}
         </div>
         <div class="topbar-actions">
           ${
@@ -980,27 +1123,414 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     `;
   }
 
+  /**
+   * The transcript as drawn. Everything downstream — the flat rows, the thread grouping, the
+   * "N replies" counts — is built from this array, so dropping a message here drops it
+   * everywhere at once. The only thing dropped is a room's stored `PASS` replies (see
+   * `dropRoomPassReplies`); outside a room this is exactly the array it always was.
+   */
   function visibleMessages(agent: Agent): AgentMessage[] {
     const out = [...agent.state.messages];
-    if (agent.state.streamingMessage) out.push(agent.state.streamingMessage);
+    const streaming = agent.state.streamingMessage;
+    if (streaming) out.push(streaming);
+    return dropRoomPassReplies(out as Array<AgentMessage & ThreadableMessage>, {
+      isRoom: isRoomThread(chatState.threadRef),
+      textOf: (message) => messageText(message),
+      keep: (message) => message === streaming,
+    });
+  }
+
+  /** Everything the affordance under a human turn draws itself from. */
+  interface ThreadSummary {
+    /** Fold-state identity — the parent's seq, or the sentinel for a turn not yet saved. */
+    key: number;
+    count: number;
+    open: boolean;
+    /** When the newest reply landed. Absent only if no reply carried a timestamp. */
+    lastAt?: number;
+    /** Who replied, first-spoke order, deduped — a persona taking three turns shows once. */
+    chips: PersonaChip[];
+  }
+
+  /** The index of the streaming partial inside the visible transcript, or null. */
+  function liveIndexIn(agent: Agent, messages: AgentMessage[]): number | null {
+    const streaming = agent.state.isStreaming ? agent.state.streamingMessage : null;
+    if (!streaming) return null;
+    const index = messages.indexOf(streaming);
+    return index >= 0 ? index : null;
+  }
+
+  /**
+   * The grouping the transcript and the panel both draw from, plus the bookkeeping that
+   * decides whether a turn taken just now pulls its thread open.
+   *
+   * Called once per draw, before anything renders, because the panel and the affordance
+   * have to agree on which thread is open within a single frame — deciding it while
+   * rendering would mean one of them read the answer the other had not written yet.
+   */
+  function buildTranscriptRows(agent: Agent, messages: AgentMessage[]): TranscriptRow[] {
+    const rows = groupRoomTranscript(messages as unknown as readonly ThreadableMessage[], {
+      liveIndex: liveIndexIn(agent, messages),
+      // Only a room threads by default. One agent answering one person is a conversation,
+      // not a thread of one — see `flattenUntypedRows`, which still keeps any thread the
+      // person opened themselves with the reply composer.
+      threadsAllowed: isRoomThread(chatState.threadRef),
+    });
+    const liveRow = rows.find((row) => row.live) ?? null;
+    if (liveRow) {
+      threadsSeenLive = true;
+      // A brand-new turn opens its thread even if the person closed the previous one while
+      // it was still running: the dismissal was about that thread, not about every thread
+      // to come. Both are keyed by the same not-yet-saved sentinel until they settle.
+      if (!liveThreadDrawn) threadPanel.dismissed = null;
+      const key = threadKeyFor(messages[liveRow.index] as ThreadableMessage);
+      // An answer arriving is the one thing that opens the panel on its own: with the
+      // replies folded, a live turn the person just sent would otherwise stream into a
+      // collapsed row they cannot see. Never over a thread with something typed into it —
+      // a reply half-written is worth more than an answer that is one click away anyway.
+      const busy = threadPanel.rootSeq !== null && threadPanel.draft.trim() !== "";
+      if (threadPanel.rootSeq !== key && threadPanel.dismissed !== key && !busy)
+        openThreadPanel(key, { redraw: false });
+    }
+    liveThreadDrawn = liveRow !== null;
+    return rows;
+  }
+
+  /**
+   * The transcript, threaded whenever entries carry it: each human turn renders as the
+   * parent, and everything that answered it — or was typed into it — collapses behind the
+   * affordance under it. This used to be room-only; core now stamps that shape in every
+   * session, so the same grouping applies everywhere the data supports it.
+   *
+   * For any reply whose parent is not on screen — including every message from before core
+   * parented replies at the human turn — `groupRoomTranscript` hands back one row per
+   * message and this is exactly the flat `.map` it replaced.
+   *
+   * Nothing folded renders here: a thread's contents live in the side panel, and the
+   * affordance is the way in.
+   */
+  function transcriptRows(
+    agent: Agent,
+    messages: AgentMessage[],
+    rows: TranscriptRow[],
+  ): Array<TemplateResult | typeof nothing> {
+    const streaming = agent.state.isStreaming ? agent.state.streamingMessage : null;
+    const out: Array<TemplateResult | typeof nothing> = [];
+    for (const row of rows) {
+      const message = messages[row.index]!;
+      if (!row.replies.length) {
+        out.push(settledChatMessage(message, row.index, message === streaming));
+        continue;
+      }
+      out.push(settledChatMessage(message, row.index, message === streaming, threadSummary(messages, row)));
+    }
     return out;
+  }
+
+  function replyCountLabel(count: number): string {
+    return `${count} ${count === 1 ? "reply" : "replies"}`;
+  }
+
+  function threadPanelId(key: number): string {
+    return `thread-panel-${key === UNSENT_THREAD_KEY ? "live" : key}`;
+  }
+
+  /**
+   * Collapsed by default, because a settled conversation is far easier to read as a list of
+   * turns than as one long run. `open` says only that this is the thread the side panel is
+   * showing — the affordance is a way in, not a place things unfold.
+   */
+  function threadSummary(messages: AgentMessage[], row: TranscriptRow): ThreadSummary {
+    const key = threadKeyFor(messages[row.index] as ThreadableMessage);
+    const chips: PersonaChip[] = [];
+    const seen = new Set<string>();
+    let lastAt: number | undefined;
+    for (const i of row.replies) {
+      const reply = messages[i] as AssistantWork & { timestamp?: number };
+      const chip = personaChipFor(reply.persona);
+      if (chip && !seen.has(chip.id)) {
+        seen.add(chip.id);
+        chips.push(chip);
+      }
+      if (typeof reply.timestamp === "number") lastAt = reply.timestamp;
+    }
+    return {
+      key,
+      count: row.replies.length,
+      open: threadPanel.rootSeq === key,
+      lastAt,
+      chips,
+    };
+  }
+
+  /**
+   * The "3 replies" bar under a human turn: who answered, how often, and when the last one
+   * landed. It is the only way into a thread, so it is a real button — keyboard reachable,
+   * naming the panel it opens.
+   */
+  function threadAffordance(thread: ThreadSummary): TemplateResult {
+    return html`<button
+      class="thread-toggle ${thread.open ? "open" : ""}"
+      type="button"
+      aria-expanded=${thread.open ? "true" : "false"}
+      aria-controls=${threadPanelId(thread.key)}
+      title=${thread.open ? "Close thread" : "Open thread"}
+      @click=${() => (thread.open ? closeThreadPanel() : openThreadPanel(thread.key))}
+    >
+      ${personaDotStack(thread.chips, (names) => `Replies from ${names}`)}
+      <span class="thread-count">${replyCountLabel(thread.count)}</span>
+      ${thread.lastAt !== undefined ? html`<span class="thread-last">${formatClock(thread.lastAt)}</span>` : nothing}
+      <span class="thread-chevron">${icon(ChevronRight, 13)}</span>
+    </button>`;
+  }
+
+  // -------------------------------------------------------------------------
+  // The thread panel
+  // -------------------------------------------------------------------------
+
+  /** The open thread, resolved against the transcript as it stands this frame. */
+  interface OpenThread {
+    /** Index of the root human turn in the visible message array. */
+    rootIndex: number;
+    /** Its seq, or the sentinel while the turn has not round-tripped through core. */
+    key: number;
+    /** Everything in the thread, in seq order — replies and the answers they drew. */
+    members: number[];
+  }
+
+  function openThreadPanel(key: number, opts: { redraw?: boolean } = {}): void {
+    if (threadPanel.rootSeq !== key) {
+      // A draft belongs to the thread it was typed into, so switching threads does not
+      // carry it along — and nor does the error from a send into the one being left.
+      threadPanel.draft = "";
+      threadPanel.error = "";
+    }
+    threadPanel.rootSeq = key;
+    threadPanel.dismissed = null;
+    // A thread just opened is read from its newest message, like every other surface here.
+    threadStickToBottom = true;
+    if (opts.redraw === false) return;
+    drawActiveChat();
+    requestAnimationFrame(() => chatState.host?.querySelector<HTMLTextAreaElement>(".thread-composer-input")?.focus());
+  }
+
+  function closeThreadPanel(): void {
+    if (threadPanel.rootSeq === null) return;
+    // Remembered so a thread still streaming does not reopen itself on the next frame.
+    threadPanel.dismissed = threadPanel.rootSeq;
+    threadPanel.rootSeq = null;
+    threadPanel.draft = "";
+    threadPanel.error = "";
+    drawActiveChat();
+  }
+
+  /**
+   * Which thread the panel is showing, against this frame's transcript — or null, which is
+   * also how the panel closes when the conversation it was reading no longer holds it (an
+   * older page scrolled out of the window, a fork, a refresh that dropped the turn).
+   */
+  function resolveOpenThread(agent: Agent, messages: AgentMessage[], rows: TranscriptRow[]): OpenThread | null {
+    const key = threadPanel.rootSeq;
+    if (key === null) return null;
+    let row = rows.find((r) => threadKeyFor(messages[r.index] as ThreadableMessage) === key) ?? null;
+    if (!row && key === UNSENT_THREAD_KEY) {
+      // The turn the panel opened on has reached core and carries a seq now, so the
+      // sentinel no longer names it. It is by construction the newest turn — there is only
+      // ever one unsaved one, at the tail — so follow it rather than blinking shut.
+      row = rows.findLast((r) => isUserRole((messages[r.index] as ThreadableMessage).role)) ?? null;
+    }
+    if (!row) {
+      threadPanel.rootSeq = null;
+      return null;
+    }
+    const rootKey = threadKeyFor(messages[row.index] as ThreadableMessage);
+    threadPanel.rootSeq = rootKey;
+    return {
+      rootIndex: row.index,
+      key: rootKey,
+      members: threadMembers(messages as unknown as readonly ThreadableMessage[], row.index, {
+        liveIndex: liveIndexIn(agent, messages),
+      }),
+    };
+  }
+
+  /**
+   * The thread, beside the transcript rather than inside it: the turn that started it on
+   * top, everything it drew below in order, and a composer that replies into it.
+   *
+   * It renders from the same message array the transcript just rendered from, so a refresh
+   * that lands while it is open updates it without a fetch of its own. The root is drawn
+   * through `chatMessage` rather than `settledChatMessage` because it is the one message on
+   * screen twice: memoising it here would fight the transcript's own cache entry for it,
+   * which carries the affordance this copy deliberately does not.
+   */
+  function threadPanelView(agent: Agent, messages: AgentMessage[], open: OpenThread): TemplateResult {
+    const streaming = agent.state.isStreaming ? agent.state.streamingMessage : null;
+    const root = messages[open.rootIndex]!;
+    return html`
+      <aside class="thread-panel" role="complementary" aria-label="Thread">
+        <div class="thread-panel-head">
+          <span class="thread-panel-title">Thread</span>
+          <button
+            class="icon-btn subtle thread-panel-close"
+            type="button"
+            title="Close thread"
+            aria-label="Close thread"
+            @click=${closeThreadPanel}
+          >
+            ${icon(X, 16)}
+          </button>
+        </div>
+        <div
+          class="thread-panel-body"
+          id=${threadPanelId(open.key)}
+          role="group"
+          aria-label=${replyCountLabel(open.members.length)}
+          data-mention-thread=${chatState.threadRef ?? ""}
+          @scroll=${onThreadPanelScroll}
+        >
+          <div class="message-stack thread-panel-stack">
+            ${chatMessage(root, open.rootIndex, root === streaming)}
+            <div class="thread-panel-rule"><span>${replyCountLabel(open.members.length)}</span></div>
+            ${open.members.map((i) => settledChatMessage(messages[i]!, i, messages[i] === streaming))}
+          </div>
+        </div>
+        ${threadComposer(agent, open)}
+      </aside>
+    `;
+  }
+
+  /**
+   * Reply-in-thread. Deliberately the plainest composer in the app — no attachments, no
+   * model pickers, no @mention autocomplete — because everything it leaves out is still
+   * one click away in the composer under the transcript.
+   */
+  function threadComposer(agent: Agent, open: OpenThread): TemplateResult {
+    // A turn core has not seen has no seq to reply *into* yet. It is a moment long, and it
+    // ends by itself when the turn settles and the panel re-anchors onto its seq.
+    const unsaved = open.key === UNSENT_THREAD_KEY;
+    const blocked = unsaved || threadPanel.sending || agent.state.isStreaming;
+    let placeholder = "Reply in thread";
+    if (unsaved) placeholder = "Saving this turn…";
+    else if (agent.state.isStreaming) placeholder = "Waiting for the running task…";
+    return html`
+      <form
+        class="thread-composer"
+        @submit=${(e: Event) => {
+          e.preventDefault();
+          void sendThreadReply(agent, open.key);
+        }}
+      >
+        ${threadPanel.error ? html`<div class="composer-error inline">${threadPanel.error}</div>` : nothing}
+        <div class="thread-composer-row">
+          <textarea
+            class="thread-composer-input"
+            rows="1"
+            placeholder=${placeholder}
+            ?disabled=${blocked}
+            .value=${live(threadPanel.draft)}
+            @input=${(e: InputEvent) => onThreadDraftInput(e)}
+            @keydown=${(e: KeyboardEvent) => onThreadComposerKeydown(e, agent, open.key)}
+          ></textarea>
+          <button
+            class="send-btn"
+            type="submit"
+            title="Reply in thread"
+            aria-label="Reply in thread"
+            ?disabled=${blocked || !threadPanel.draft.trim()}
+          >
+            ${icon(ArrowUp, 16)}
+          </button>
+        </div>
+      </form>
+    `;
+  }
+
+  /**
+   * No redraw on a keystroke: the send button is the only thing on screen that depends on
+   * the draft, so it is synced in place. Redrawing would re-render the textarea the person
+   * is typing into, exactly as the main composer avoids doing.
+   */
+  function onThreadDraftInput(e: InputEvent): void {
+    const input = e.currentTarget as HTMLTextAreaElement;
+    threadPanel.draft = input.value;
+    input.style.height = "auto";
+    input.style.height = `${Math.min(input.scrollHeight, 160)}px`;
+    const send = input.parentElement?.querySelector<HTMLButtonElement>(".send-btn");
+    if (send) send.disabled = !threadPanel.draft.trim();
+  }
+
+  function onThreadComposerKeydown(e: KeyboardEvent, agent: Agent, key: number): void {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      closeThreadPanel();
+      return;
+    }
+    if (e.key !== "Enter" || e.shiftKey) return;
+    e.preventDefault();
+    void sendThreadReply(agent, key);
+  }
+
+  /**
+   * Sends through the composer's own send path, with the thread root attached. The draft is
+   * cleared optimistically and handed back if the send failed, so a message is never lost to
+   * a network blip — the panel is the only place it was ever written down.
+   */
+  async function sendThreadReply(agent: Agent, key: number): Promise<void> {
+    const text = threadPanel.draft.trim();
+    if (!text || key === UNSENT_THREAD_KEY || threadPanel.sending || agent.state.isStreaming) return;
+    threadPanel.sending = true;
+    threadPanel.draft = "";
+    threadPanel.error = "";
+    drawActiveChat(agent);
+    try {
+      await ctx.composer.sendPrompt(agent, { text, replyToSeq: key });
+    } catch (err) {
+      threadPanel.draft = text;
+      threadPanel.error = errMessage(err, "Could not send the reply.");
+    } finally {
+      threadPanel.sending = false;
+      if (agent === chatState.agent) drawActiveChat(agent);
+    }
+  }
+
+  /** Cache-invalidation identity for the affordance a memoised row carries (see SettledRowKey). */
+  function threadRowKey(thread: ThreadSummary | undefined): string {
+    if (!thread) return "";
+    // Joined on a character none of the parts can contain, so the key is unambiguous.
+    return [
+      thread.key,
+      thread.count,
+      thread.open ? "open" : "shut",
+      thread.lastAt ?? "",
+      thread.chips.map((chip) => `${chip.id}:${chip.glyph ?? ""}:${chip.color ?? ""}`).join(","),
+    ].join("\n");
   }
 
   function settledChatMessage(
     message: AgentMessage,
     index: number,
     isStreaming: boolean,
+    thread?: ThreadSummary,
   ): TemplateResult | typeof nothing {
+    // A system note ("Scout was added to the room") renders as a bare muted line — no
+    // bubble, no persona chrome, no caching (it is a single text node).
+    const sysNote = (message as { systemNote?: string }).systemNote;
+    if (sysNote) return html`<div class="chat-sys-note">${sysNote}</div>`;
     const msg = message as AssistantWork & { stopReason?: string; errorMessage?: string; approvalDecision?: string };
     const work = msg.work;
     const cacheable =
       !isStreaming &&
       (!work || ((work.status === "complete" || work.status === "failed") && !work.pendingApprovals?.length));
-    if (!cacheable) return chatMessage(message, index, isStreaming);
+    if (!cacheable) return chatMessage(message, index, isStreaming, thread);
     const forkable = Boolean(chatState.threadRef && chatState.sessionId && chatState.agent);
+    const persona = personaRowKey(msg.persona);
+    const threadKey = threadRowKey(thread);
     const hit = settledRowCache.get(message as object);
     if (
       hit &&
+      hit.persona === persona &&
+      hit.thread === threadKey &&
       hit.index === index &&
       hit.activity === work?.activity &&
       hit.status === work?.status &&
@@ -1013,7 +1543,7 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     ) {
       return hit.tpl;
     }
-    const tpl = chatMessage(message, index, isStreaming);
+    const tpl = chatMessage(message, index, isStreaming, thread);
     settledRowCache.set(message as object, {
       index,
       activity: work?.activity,
@@ -1024,12 +1554,19 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
       errorMessage: msg.errorMessage,
       approvalDecision: msg.approvalDecision,
       forkable,
+      persona,
+      thread: threadKey,
       tpl,
     });
     return tpl;
   }
 
-  function chatMessage(message: AgentMessage, index: number, isStreaming = false): TemplateResult | typeof nothing {
+  function chatMessage(
+    message: AgentMessage,
+    index: number,
+    isStreaming = false,
+    thread?: ThreadSummary,
+  ): TemplateResult | typeof nothing {
     if ((message as { opener?: boolean }).opener) return nothing;
     const role = (message as { role?: string }).role;
     if (role === "user" || role === "user-with-attachments") {
@@ -1042,7 +1579,7 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
             ${markdown(messageText(message))}
             ${attachments.length ? html`<div class="message-files">${attachments.map(userAttachmentBadge)}</div>` : nothing}
           </div>
-          ${messageMeta(message, index)}
+          ${thread ? threadAffordance(thread) : nothing} ${messageMeta(message, index)}
         </article>
       `;
     }
@@ -1062,8 +1599,8 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
       return html`
         <article class="message-row assistant-row ${isStreaming ? "streaming" : ""}" data-index=${index}>
           <div class="assistant-body">
-            ${showWork ? workBlock(work, isStreaming) : nothing} ${assistantContent(msg, isStreaming, showWork)}
-            ${assistantFileList(deliveredFiles)}
+            ${personaAuthorChip((msg as AssistantWork).persona)} ${showWork ? workBlock(work, isStreaming) : nothing}
+            ${assistantContent(msg, isStreaming, showWork)} ${assistantFileList(deliveredFiles)}
             ${msg.stopReason === "error" && msg.errorMessage ? html`<div class="composer-error inline">${msg.errorMessage}</div>` : nothing}
             ${msg.stopReason === "aborted" ? html`<div class="stopped-note">${icon(Ban, 13)}<span>Stopped</span></div>` : nothing}
             ${isStreaming ? nothing : messageMeta(msg, index)}
@@ -1102,7 +1639,7 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
                 type="button"
                 title="Fork conversation from here"
                 aria-label="Fork conversation from here"
-                @click=${() => void forkFromMessage(index)}
+                @click=${() => void forkFromMessage(message)}
               >
                 ${icon(GitFork, 13)}
               </button>`
@@ -1112,15 +1649,22 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     `;
   }
 
-  async function forkFromMessage(index: number): Promise<void> {
+  /**
+   * Takes the message rather than its row position: the transcript can be a filtered view of
+   * `agent.state.messages` (a room hides its stored `PASS` replies), so a row index is not an
+   * index into the array the cut is computed over. The identity is, and it is unambiguous —
+   * every row is drawn from an element of that same array.
+   */
+  async function forkFromMessage(target: AgentMessage): Promise<void> {
     const agent = chatState.agent;
     const sessionId = chatState.sessionId;
     const sourceThreadRef = chatState.threadRef;
     if (!agent || !sessionId) return;
     const messages = agent.state.messages as Array<{ role?: string }>;
-    const target = messages[index];
-    if (!target) return;
-    const isUser = target.role === "user" || target.role === "user-with-attachments";
+    const index = agent.state.messages.indexOf(target);
+    if (index < 0) return;
+    const targetRole = (target as { role?: string }).role;
+    const isUser = targetRole === "user" || targetRole === "user-with-attachments";
     let userOrdinal = 0;
     for (let i = 0; i <= index; i++) {
       const role = messages[i]?.role;
@@ -1956,10 +2500,32 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
   }
 
   let stickToBottom = true;
+  let threadStickToBottom = true;
 
   function onTranscriptScroll(e: Event): void {
     const s = e.currentTarget as HTMLElement;
     stickToBottom = s.scrollHeight - s.scrollTop - s.clientHeight <= 120;
+  }
+
+  function onThreadPanelScroll(e: Event): void {
+    const s = e.currentTarget as HTMLElement;
+    threadStickToBottom = s.scrollHeight - s.scrollTop - s.clientHeight <= 120;
+  }
+
+  /**
+   * Keeps the open thread pinned to its newest message while a reply streams into it — the
+   * same "stay put if the person scrolled up to read" rule the transcript follows, tracked
+   * from the panel's own scrolling rather than the transcript's. Read from the last scroll
+   * event rather than measured here, because by the time this runs the new message is
+   * already in the DOM and the gap it left behind is exactly what would be measured.
+   */
+  function scrollThreadPanel(): void {
+    if (!threadStickToBottom) return;
+    const body = chatState.host?.querySelector<HTMLElement>(".thread-panel-body");
+    if (!body) return;
+    requestAnimationFrame(() => {
+      body.scrollTop = body.scrollHeight;
+    });
   }
 
   function scrollTranscript(force = false): void {

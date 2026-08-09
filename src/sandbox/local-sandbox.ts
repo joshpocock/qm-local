@@ -96,6 +96,13 @@ export function createLocalSandbox(workspace: WorkspaceStore, opts: LocalSandbox
   const homeDir = opts.homeDir ?? HOME_DIR;
   const workspaceDir = `${homeDir}/${WORKSPACE_BASENAME}`;
   const provisionQueue = createKeyedQueue<string>();
+  // qm-local: when core itself runs inside a container (docker target), the
+  // host-loopback publish + `docker port` dance cannot work: the sandbox's
+  // published port lives on the host's 127.0.0.1, which is not the core
+  // container's 127.0.0.1. LOCAL_SANDBOX_SHARED_NETWORK names a docker network
+  // both core and sandboxes join, and the exec daemon is dialed by container
+  // name on it instead. Set by the deployment CLI; unset in the host dev loop.
+  const sharedNetwork = process.env.LOCAL_SANDBOX_SHARED_NETWORK?.trim() || undefined;
 
   const portByName = new Map<string, number>();
   const scopeByContainer = new Map<string, string>();
@@ -165,9 +172,9 @@ export function createLocalSandbox(workspace: WorkspaceStore, opts: LocalSandbox
     timeoutMs?: number,
     signal?: AbortSignal,
   ): Promise<{ status: number; text: string }> {
-    const port = await resolvePort(name);
+    const base = sharedNetwork ? `http://${name}:${AGENT_PORT}` : `http://127.0.0.1:${await resolvePort(name)}`;
     const signals = [AbortSignal.timeout(timeoutMs ?? 30_000), ...(signal ? [signal] : [])];
-    const res = await fetchImpl(`http://127.0.0.1:${port}${path}`, {
+    const res = await fetchImpl(`${base}${path}`, {
       method: body === undefined ? "GET" : "POST",
       ...(body === undefined ? {} : { body: JSON.stringify(body), headers: { "content-type": "application/json" } }),
       signal: AbortSignal.any(signals),
@@ -237,7 +244,7 @@ export function createLocalSandbox(workspace: WorkspaceStore, opts: LocalSandbox
   }
 
   async function runContainer(name: string, scope: string | undefined, withVolume: boolean): Promise<void> {
-    const net = await ensureNetwork(name);
+    const net = sharedNetwork ?? (await ensureNetwork(name));
     const args = [
       "run",
       "-d",
@@ -253,8 +260,9 @@ export function createLocalSandbox(workspace: WorkspaceStore, opts: LocalSandbox
       "--network",
       net,
       ...(withVolume && scope ? ["-v", `${localVolumeName(scope)}:${homeDir}`] : []),
-      "-p",
-      `127.0.0.1:0:${AGENT_PORT}`,
+      // On the shared network the daemon is dialed by container name; the
+      // host-loopback publish is only for the on-host dev loop.
+      ...(sharedNetwork ? [] : ["-p", `127.0.0.1:0:${AGENT_PORT}`]),
       "--add-host=host.docker.internal:host-gateway",
       ...(opts.cpus ? ["--cpus", String(opts.cpus)] : []),
       ...(opts.memoryMb ? ["--memory", `${opts.memoryMb}m`] : []),
