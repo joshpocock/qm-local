@@ -356,8 +356,10 @@ export function createMemorySessionStore(opts: StoreOptions = {}): SessionStore 
     async distinctScopes() {
       const byScope = new Map<string, string | undefined>();
       for (const s of sessions.values()) {
+        // A DM's channelName names its counterpart, not a room — see the Postgres store.
+        const channelName = s.type === "dm" ? undefined : s.channelName;
         const prev = byScope.get(s.scopeId);
-        if (!byScope.has(s.scopeId) || (s.channelName && !prev)) byScope.set(s.scopeId, s.channelName);
+        if (!byScope.has(s.scopeId) || (channelName && !prev)) byScope.set(s.scopeId, channelName);
       }
       return [...byScope].map(([scopeId, channelName]) => ({ scopeId, ...(channelName ? { channelName } : {}) }));
     },

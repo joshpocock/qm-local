@@ -4174,6 +4174,22 @@
                       <option value="on">On</option>
                       <option value="off">Off</option>
                     </select>
+                    <label for="debate-rounds">Debate rounds</label>
+                    <p class="hint" style="margin: 2px 0 6px">
+                      Ceiling on how many times a multi-agent debate in this channel goes round its roster. Leave blank
+                      to follow the admin default (<span id="debate-rounds-default">1</span>), which this can only
+                      narrow. A count asked for in the message itself wins below the ceiling, and a round in which every
+                      agent passes ends the debate early.
+                    </p>
+                    <input
+                      type="number"
+                      id="debate-rounds"
+                      min="1"
+                      max="20"
+                      step="1"
+                      placeholder="Default"
+                      style="margin-bottom: 14px"
+                    />
                     <label for="ambient-orders">Standing order</label>
                     <textarea
                       id="ambient-orders"
@@ -7983,6 +7999,12 @@
         if (p?.ambientEnabled === true) ambientEnabled = "on";
         else if (p?.ambientEnabled === false) ambientEnabled = "off";
         $("ambient-enabled").value = ambientEnabled;
+        // Blank means "no channel override": the admin default applies, so name it in the
+        // placeholder rather than leaving an operator to guess what they would be narrowing.
+        const roundsDefault = typeof p?.defaultDebateRounds === "number" ? p.defaultDebateRounds : 1;
+        $("debate-rounds-default").textContent = String(roundsDefault);
+        $("debate-rounds").placeholder = "Default (" + roundsDefault + ")";
+        $("debate-rounds").value = typeof p?.debateRounds === "number" ? String(p.debateRounds) : "";
         $("ambient-orders").value = p?.orders || "";
         const body = $("ambient-bots");
         body.textContent = "";
@@ -8016,10 +8038,17 @@
           bots[name] = entry;
         }
         const ambientSel = $("ambient-enabled").value;
+        // Blank clears the channel override back to the admin default; anything else must be a
+        // whole number in range, checked here so a typo never costs a round trip.
+        const roundsRaw = $("debate-rounds").value.trim();
+        const debateRounds = roundsRaw ? Number(roundsRaw) : null;
+        if (roundsRaw && (!Number.isInteger(debateRounds) || debateRounds < 1 || debateRounds > 20))
+          throw new Error("Debate rounds must be a whole number from 1 to 20, or blank for the default.");
         return {
           orders: $("ambient-orders").value,
           bots,
           ambientEnabled: ambientSel === "default" ? null : ambientSel === "on",
+          debateRounds,
           baseUpdatedAt: Number($("card-ambient-policy").dataset.base || 0),
         };
       }

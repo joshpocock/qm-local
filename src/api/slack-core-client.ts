@@ -62,6 +62,12 @@ export interface SlackCoreClient {
   readBlob(blobId: string): Promise<Buffer>;
   readFileArtifact(artifactId: string, viewerId: string): Promise<Buffer>;
   ingestSurfaceEvents(events: IngestEvent[], self?: { name?: string; mentionId?: string }): Promise<void>;
+  /**
+   * This channel's debate-rounds override, or `undefined` when it has none and the admin default
+   * applies. Read per panel turn through the plugin's short-TTL cache (`src/slack/debate-rounds.ts`),
+   * never on the hot path directly.
+   */
+  channelDebateRounds(container: string): Promise<number | undefined>;
   submitTurn(body: Omit<TurnRequest, "surface">): Promise<TurnResult>;
   waitRun(runId: string, hooks?: SlackRunHooks): Promise<TurnResult | null>;
   activeRunForThread(threadRef: string): Promise<string | undefined>;
@@ -176,6 +182,10 @@ export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClien
     async ingestSurfaceEvents(events, self) {
       if (!events.length) return;
       await deps.app.ingestSurfaceEvents(events, "slack", self);
+    },
+
+    async channelDebateRounds(container) {
+      return (await deps.app.getChannelPolicy(container))?.debateRounds;
     },
 
     submitTurn(body) {

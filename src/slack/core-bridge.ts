@@ -1,5 +1,6 @@
 import { swallow } from "../util/errors.ts";
 import { sleep, createInFlightThreadMap, type RunTaskView } from "./lib.ts";
+import { createDebateRoundsResolver } from "./debate-rounds.ts";
 import type { SlackCoreClient } from "../api/slack-core-client.ts";
 import type { TurnRequest, TurnResult } from "../types.ts";
 
@@ -28,9 +29,21 @@ export interface CoreBridge {
   stageBlobInCore(bytes: Uint8Array): Promise<{ blobId: string; sizeBytes: number }>;
   fetchBlobFromCore(blobId: string): Promise<Buffer>;
   fetchFileArtifactFromCore(artifactId: string, viewerId: string): Promise<Buffer>;
+  /**
+   * The rounds a multi-bot debate in `container` may run for: the channel's own override when it
+   * has one, otherwise the admin default this instance started with. `requested` — a count stated
+   * in the triggering message — is held UNDER that ceiling, never above it.
+   *
+   * Cached per channel for `DEBATE_ROUNDS_TTL_MS`, so calling it once per panel turn is free.
+   */
+  effectiveDebateRounds(container: string, requested?: number): Promise<number>;
 }
 
-export function createCoreBridge(core: SlackCoreClient): CoreBridge {
+export function createCoreBridge(core: SlackCoreClient, opts: { panelRounds?: number } = {}): CoreBridge {
+  const debateRounds = createDebateRoundsResolver({
+    channelDebateRounds: (container) => core.channelDebateRounds(container),
+    fallback: opts.panelRounds ?? 1,
+  });
   const stageBlobInCore = async (bytes: Uint8Array): Promise<{ blobId: string; sizeBytes: number }> => {
     try {
       return await core.stageBlob(bytes);
@@ -173,5 +186,6 @@ export function createCoreBridge(core: SlackCoreClient): CoreBridge {
     stageBlobInCore,
     fetchBlobFromCore,
     fetchFileArtifactFromCore,
+    effectiveDebateRounds: debateRounds.effectiveDebateRounds,
   };
 }

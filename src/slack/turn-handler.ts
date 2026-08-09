@@ -171,7 +171,7 @@ export function createTurnHandler(deps: {
     deduper,
     externalParticipantsEnabled,
   } = deps;
-  const { classifyUserCached, classifyActor, getChannelInfo, channelMembership } = directory;
+  const { classifyUserCached, classifyActor, dmCounterpartName, getChannelInfo, channelMembership } = directory;
   const { mirrorSelfPost, mirrorMessageEvent } = mirror;
   const {
     callCore,
@@ -473,13 +473,23 @@ export function createTurnHandler(deps: {
 
     if (inc.unprompted && !text.trim() && attachments.length === 0) return;
 
+    // A DM has no channel name, so the session it opens has nothing to render but whatever
+    // title the model later invents for it — "Set up Slack keychain, pick voice" instead of
+    // who it is with. `channelName` is the field a Slack conversation's name already travels
+    // in, so a DM sends its counterpart there and the sidebar names the row the way Slack
+    // does. It is deliberately NOT put in the local `channelName` variable: everything else
+    // here (the gateway location, the conversation view, delivery candidates, `#`-prefixed
+    // labels) means "channel" by that name, and a DM is not one.
+    const conversationName =
+      inc.kind === "dm" ? await dmCounterpartName(client, inc.channel, inc.userId) : channelName;
+
     const turn: Omit<CoreTurnBody, "approval"> = {
       actor,
       conversation: {
         kind: conversationKind,
         threadRef,
         ...(channelRef ? { channelRef } : {}),
-        ...(channelName ? { channelName } : {}),
+        ...(conversationName ? { channelName: conversationName } : {}),
         audience,
         ...(isPrivate !== undefined ? { isPrivate } : {}),
         ...(isMpimChannel !== undefined ? { isMpim: isMpimChannel } : {}),
@@ -518,10 +528,11 @@ export function createTurnHandler(deps: {
         ? {
             room: {
               personaIds: panel.map((bot) => bot.personaId!),
-              // The admin's "Debate rounds" is a CEILING, not a quota. A count stated in the
-              // message itself ("go back and forth 4 times") wins below it; nothing stated
-              // means the ceiling, and the PASS rule still ends a debate early either way.
-              rounds: Math.min(requestedPanelRounds(inc.rawText) ?? deps.panelRounds, deps.panelRounds),
+              // The rounds budget, narrowing at each layer: the channel's own override (if an
+              // admin set one) else the org-wide "Debate rounds" ceiling; a count stated in
+              // the message ("go back and forth 4 times") wins BELOW that ceiling, never
+              // above it; and the PASS rule still ends a debate early either way.
+              rounds: await bridge.effectiveDebateRounds(inc.channel, requestedPanelRounds(inc.rawText)),
             },
           }
         : deps.personaId

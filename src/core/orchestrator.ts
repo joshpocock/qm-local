@@ -1638,6 +1638,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
 
         const spine: SpineState = {
           surfaceOutboundCount: 0,
+          surfacePostedCount: 0,
           crossConversationPosts: 0,
           staySilentReason: undefined,
           turnUserEntrySeq: undefined,
@@ -2478,6 +2479,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                 provenance: postProvenance(directKey),
               });
               spine.surfaceOutboundCount += 1;
+              // Shed-reply delivery: the agent wrote a real answer, we put it on the surface on
+              // its behalf. That is the persona speaking, so it counts as posted.
+              spine.surfacePostedCount += 1;
               if (input.runId) deps.turnStream?.markSurfacePosted(input.runId);
             } catch (e) {
               console.error(`[orchestrator] direct reply delivery failed session=${session.id}:`, errMessage(e));
@@ -2548,6 +2552,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                     provenance: postProvenance(fallbackKey),
                   });
                   spine.surfaceOutboundCount += 1;
+                  spine.surfacePostedCount += 1;
                   if (input.runId) deps.turnStream?.markSurfacePosted(input.runId);
                 } catch (e) {
                   console.error(
@@ -2910,7 +2915,17 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         } else if (isPollFire && !outbound.attachments.length && isSilentPollReply(reply)) {
           finalResult = { status: "silent", sessionId: session.id };
         } else if (input.surfaceTools && surfaceToolDeps && !strictReadOnly) {
-          finalResult = { status: "silent", sessionId: session.id, ...(result.stopped ? { stopped: true } : {}) };
+          // The agent speaks through the surface tools here, so there is no reply to hand back
+          // and the result is always `silent`. `posted` is the only thing separating a persona
+          // that argued from one that said nothing — the panel driver reads it to decide whether
+          // a round was quiet, so a Slack debate runs its full budget instead of stopping at
+          // round 1 while a genuinely settled room still ends early.
+          finalResult = {
+            status: "silent",
+            sessionId: session.id,
+            ...(spine.surfacePostedCount > 0 ? { posted: true } : {}),
+            ...(result.stopped ? { stopped: true } : {}),
+          };
         } else {
           finalResult = {
             status: "ok",

@@ -96,6 +96,10 @@ export interface ChannelMeta {
   is_pending_ext_shared?: boolean;
   is_mpim?: boolean;
   is_private?: boolean;
+  /** `conversations.info` on a 1:1 DM: the container is an IM… */
+  is_im?: boolean;
+  /** …and this is the member on the other side of it from the token that asked. */
+  user?: string;
   purpose?: { value?: string };
   topic?: { value?: string; creator?: string };
 }

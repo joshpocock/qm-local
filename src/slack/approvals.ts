@@ -678,7 +678,11 @@ export function createApprovals(deps: {
               ...(ctx.replyThreadTs ? { replyThreadTs: ctx.replyThreadTs } : {}),
               threadOnly: ctx.threadOnly,
               kind: ctx.turn.conversation.kind,
-              ...(ctx.turn.conversation.channelName ? { channelName: ctx.turn.conversation.channelName } : {}),
+              // A DM carries its counterpart's name in `channelName` (see turn-handler); it is
+              // a person, not a room, so it must never become "#name agent" here.
+              ...(ctx.turn.conversation.kind !== "dm" && ctx.turn.conversation.channelName
+                ? { channelName: ctx.turn.conversation.channelName }
+                : {}),
               audience: ctx.turn.conversation.audience ?? [],
               ...(ctx.slackIdsByPrincipal ? { slackIdsByPrincipal: ctx.slackIdsByPrincipal } : {}),
             },

@@ -197,15 +197,39 @@ export function resetSlackPanelClaims(): void {
   panelClaims.clear();
 }
 
+/**
+ * True when a Slack event was authored by THIS bot or by a sibling qm bot running in the same
+ * process — the identity half of `shouldProcessMessage`, without its subtype filter.
+ *
+ * Split out because `app_mention` needs the same answer on an event shape that is not a message:
+ * a persona's panel reply carries `<@U…>` pills for the other personas (that is how the debate
+ * reads in Slack), and Slack fans an `app_mention` out to every app named in it. Left ungated,
+ * that echo reaches the mentioned sibling as an ADDRESSED turn on the panel's own threadRef,
+ * where core folds it into the persona run still in flight as a mid-turn steer — the run then
+ * sits open answering its own echo until the turn wall clock expires, and the panel, blocked
+ * awaiting that turn, never reaches round 2. See docs/slack-multi-bot.md ("Bots do not answer
+ * each other"), which this restores for the mention path.
+ *
+ * Empty beyond this bot's own ids in a single-bot deployment, so nothing changes there.
+ */
+export function isSelfOrSiblingAuthored(
+  m: { bot_id?: string; user?: string },
+  botUserId = "",
+  ownBotId = "",
+): boolean {
+  if (botUserId && m.user === botUserId) return true;
+  if (ownBotId && m.bot_id === ownBotId) return true;
+  if (m.user && siblingBotIds.has(String(m.user))) return true;
+  if (m.bot_id && siblingBotIds.has(String(m.bot_id))) return true;
+  return false;
+}
+
 export function shouldProcessMessage(
   m: { subtype?: string; bot_id?: string; user?: string },
   botUserId: string,
   ownBotId = "",
 ): boolean {
-  if (botUserId && m.user === botUserId) return false;
-  if (ownBotId && m.bot_id === ownBotId) return false;
-  if (m.user && siblingBotIds.has(String(m.user))) return false;
-  if (m.bot_id && siblingBotIds.has(String(m.bot_id))) return false;
+  if (isSelfOrSiblingAuthored(m, botUserId, ownBotId)) return false;
   if (m.subtype && m.subtype !== "file_share" && m.subtype !== "thread_broadcast" && m.subtype !== "bot_message")
     return false;
   return true;

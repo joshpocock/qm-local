@@ -288,7 +288,9 @@ export function createAppHelpers(deps: AppDeps, app: App) {
         ctx = { scopeId: s.scopeId, kind: "group", name: s.channelName ?? null, sessionCount: 0, lastActivityAt: null };
       }
       if (!ctx) continue;
-      if (!ctx.name && s.channelName) ctx.name = s.channelName;
+      // A DM's `channelName` is who it is with, not a room this scope is named after — it
+      // would rename someone's personal context after whichever bot last DMed them.
+      if (!ctx.name && s.channelName && s.type !== "dm") ctx.name = s.channelName;
       if (s.hasEntries !== false || Boolean(s.title?.trim())) {
         ctx.sessionCount++;
         ctx.lastActivityAt = Math.max(ctx.lastActivityAt ?? 0, s.lastActivityAt ?? s.createdAt);

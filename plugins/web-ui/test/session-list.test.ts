@@ -215,6 +215,19 @@ test("groupSlackChannels leaves DMs flat, interleaved with channels by recency",
   assert.equal(flat?.kind === "session" && flat.session, dm, "and it is the very same session object, untouched");
 });
 
+test("groupSlackChannels: a DM that knows its counterpart is still not a channel", () => {
+  // A DM now carries a name in `channelName` — the person it is with — and QM models a DM as
+  // one continuous session, so there are no sub-threads to fold under a heading. The name is
+  // for the row's title only; grouping keys off the `ch:` thread ref and must ignore it.
+  const dm = { ...saved("dm1", "dm:D0BOSS"), channelName: "qm-cc", lastActivityAt: 35 };
+  const items = groupSlackChannels([slackThread("g1", "C0GEN", "1.1", 50, "general"), dm]);
+  assert.deepEqual(
+    items.map((item) => (item.kind === "channel" ? `channel:${item.name}` : `session:${item.session.id}`)),
+    ["channel:general", "session:dm1"],
+  );
+  assert.equal(slackChannelIdOf(dm.threadRef), null, "a DM ref names no channel to group under");
+});
+
 test("groupSlackChannels: one thread still gets a channel heading, and an empty list gets nothing", () => {
   // A lone thread is grouped too: the heading is what says which channel it is, and a second
   // thread arriving must not reshuffle the row it is already sitting in.

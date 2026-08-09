@@ -130,7 +130,9 @@ export async function startSlackPlugin(
   const deduper = createDeduper(1000);
   const threads = createThreadTracker();
 
-  const bridge = createCoreBridge(core);
+  // `panelRounds` is the admin default this instance resolved at start-up; the bridge narrows it
+  // per channel from `channel_policy.debate_rounds` when that channel sets its own ceiling.
+  const bridge = createCoreBridge(core, { panelRounds: cfg.panelRounds ?? 1 });
   const ackEmoji = createAckEmojiPicker(core);
   const directory = createDirectory({
     core,

@@ -458,6 +458,31 @@ test("first action is `post` (speaking deliberately) → the opening text is NOT
   }
 });
 
+test("a spine turn that posted comes back silent+posted; one that declined comes back silent alone", async () => {
+  // Both are `silent` — the agent speaks through the surface, so no reply rides back. `posted`
+  // is what separates them, and the panel driver reads exactly that to decide whether a round
+  // was quiet. Without it a Slack debate ends after round 1 however many rounds it was given.
+  const built = freshApp();
+  built.runtime.start();
+  try {
+    const spoke = await built.app.turn({
+      ...mention("!speakpost I disagree, and here is why", "C-posted", "740.1"),
+      async: false,
+    });
+    assert.equal(spoke.status, "silent", "a spine-routed turn has no reply to hand back");
+    assert.equal(spoke.posted, true, "it did put a real message on the surface");
+
+    const declined = await built.app.turn({
+      ...mention("!staysilent nothing to add", "C-posted", "740.2"),
+      async: false,
+    });
+    assert.equal(declined.status, "silent");
+    assert.notEqual(declined.posted, true, "a decline posted nothing, so it stays quiet to the driver");
+  } finally {
+    await built.runtime.stop();
+  }
+});
+
 test("addressed + stay_silent → no nudge (explicit decline is accepted)", async () => {
   const built = freshApp();
   built.runtime.start();
