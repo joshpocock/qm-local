@@ -25,7 +25,7 @@ import {
   type ServiceCredentialInput,
 } from "../../credentials/keychain.ts";
 import { parseBotLedger, parseDebateRounds } from "../../surface-cache/channel-policy-store.ts";
-import { resolveSlackPanelRounds } from "../../slack/config.ts";
+import { defaultDebateRounds } from "./context-policy.ts";
 import { authorizeUrl, PROVIDERS, type ConsentMode } from "../../connectors/oauth.ts";
 import { resolverFor } from "./connectors.ts";
 import { encodeRef, serviceCredRef } from "../../acl/resource-ref.ts";
@@ -85,17 +85,6 @@ const MAX_SOUL_CHARS = 100_000;
 function channelContainer(scope: string): string | undefined {
   const { kind, ref } = parseScopeId(scope);
   return ref && (kind === "channel" || kind === "group") ? ref : undefined;
-}
-
-/**
- * The debate-rounds ceiling a channel with no override of its own follows: the admin setting on
- * the Slack installation, then `QM_SLACK_PANEL_ROUNDS`, then 1 — the same resolution the plugin
- * does at start-up. Reported alongside the channel value so the admin UI can label a blank
- * override "default (N)" instead of leaving an operator to guess what they are narrowing.
- */
-async function defaultDebateRounds(deps: ServerDeps): Promise<number> {
-  const stored = await deps.slackInstallation?.get().catch(() => undefined);
-  return resolveSlackPanelRounds(stored?.panelRounds, process.env);
 }
 
 export const ADMIN_RESOURCES: readonly AdminResource[] = [

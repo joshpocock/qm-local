@@ -854,7 +854,15 @@ const routeRequest = async (req: IncomingMessage, res: ServerResponse) => {
     }
     if (method === "PUT" && contextPolicy) {
       const scope = decodeURIComponent(contextPolicy[1]!);
-      let p: { orders?: unknown; bots?: unknown; ambientEnabled?: unknown; baseUpdatedAt?: unknown };
+      let p: {
+        orders?: unknown;
+        bots?: unknown;
+        ambientEnabled?: unknown;
+        // Omitted entirely (not sent as null) leaves the channel's stored override alone —
+        // the rounds control and the standing-orders card save through the same PUT.
+        debateRounds?: unknown;
+        baseUpdatedAt?: unknown;
+      };
       try {
         p = JSON.parse((await readBody(req)) || "{}") as typeof p;
       } catch (e) {
@@ -870,6 +878,7 @@ const routeRequest = async (req: IncomingMessage, res: ServerResponse) => {
           orders: p.orders,
           bots: p.bots,
           ambientEnabled: p.ambientEnabled,
+          ...("debateRounds" in p ? { debateRounds: p.debateRounds } : {}),
           baseUpdatedAt: p.baseUpdatedAt,
         }),
       );

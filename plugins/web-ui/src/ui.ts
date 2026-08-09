@@ -1,4 +1,5 @@
 import { html, nothing, type TemplateResult } from "lit";
+import { ref } from "lit/directives/ref.js";
 import { ChevronDown, createElement, type IconNode } from "lucide";
 
 export function brandName(): string {
@@ -42,9 +43,36 @@ export function fieldSelect(props: {
       aria-label=${props.ariaLabel ?? nothing}
       aria-describedby=${props.describedBy ?? nothing}
       data-focus-key=${props.focusKey ?? nothing}
+      data-select-value=${props.value ?? nothing}
       .value=${props.value ?? nothing}
       ?disabled=${props.disabled ?? false}
       @change=${(e: Event) => props.onChange((e.currentTarget as HTMLSelectElement).value, e)}
+      ${ref((el) => {
+        // lit commits an element's attribute/property parts BEFORE its child part, so on this
+        // element's first paint the `.value` property above is assigned to a <select> that has
+        // no <option>s yet — the browser silently drops it and the control falls back to
+        // whichever option renders first. The `ref()` callback fires at that same moment (it is
+        // itself just another part committed in the same pass), so it can't correct this
+        // synchronously either; it only fires once per element identity (not on later re-renders
+        // of the same node), which is exactly the first-paint window this bug lives in.
+        //
+        // The fix: defer one microtask. lit's child parts commit synchronously within the current
+        // render pass, so by the time the microtask queue drains — before the browser gets a
+        // chance to paint — the `<option>`s are already in the DOM and a `.value` assignment
+        // sticks. Read the desired value off `data-select-value` rather than closing over
+        // `props.value`: a plain attribute commits fine on a childless `<select>` (unlike the
+        // property), and re-reading it at microtask time (instead of capturing it now) means a
+        // second, later render of the same element in the same tick — which updates the
+        // attribute again before the single scheduled microtask runs — still lands on ITS value,
+        // not a stale one captured here.
+        if (!el) return;
+        const select = el as HTMLSelectElement;
+        queueMicrotask(() => {
+          if (!select.isConnected) return;
+          const desired = select.getAttribute("data-select-value");
+          if (desired !== null && select.value !== desired) select.value = desired;
+        });
+      })}
     >
       ${props.options}
     </select>

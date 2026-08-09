@@ -144,6 +144,79 @@ test("ambientEnabled round-trips through the member route and rejects non-boolea
   assert.equal((await store.get("C5"))?.ambientEnabled, undefined);
 });
 
+/**
+ * The debate-rounds ceiling rides the member route as well as the admin resource, because the
+ * admin card is not reachable without a scope picker — a member on the Slack channel surface is
+ * who actually sets this. Same three states as `ambientEnabled`: omitted preserves, `null`
+ * clears, an integer in range narrows. The GET reports the default alongside so a UI can say
+ * "3 rounds · org default" rather than making someone guess what a blank override inherits.
+ */
+test("debateRounds round-trips through the member route, and reports the default it inherits", async () => {
+  const store = createMemoryChannelPolicyStore();
+  const set = makeCtx({
+    contexts: ["channel:C6"],
+    store,
+    body: { principalId: "alice", scope: "channel:C6", orders: "", bots: {}, debateRounds: 3 },
+  });
+  await setContextPolicy(set.ctx);
+  assert.equal(set.out.status, 200);
+  assert.equal((set.out.body as any).policy.debateRounds, 3);
+  assert.equal((await store.get("C6"))?.debateRounds, 3);
+
+  const read = makeCtx({
+    url: "http://x/v1/contexts/policy?principalId=alice&scope=channel:C6",
+    contexts: ["channel:C6"],
+    store,
+  });
+  await getContextPolicy(read.ctx);
+  assert.equal((read.out.body as any).policy.debateRounds, 3);
+  assert.equal(typeof (read.out.body as any).policy.defaultDebateRounds, "number");
+
+  const untouched = makeCtx({
+    contexts: ["channel:C6"],
+    store,
+    body: { principalId: "alice", scope: "channel:C6", orders: "new orders", bots: {} },
+  });
+  await setContextPolicy(untouched.ctx);
+  assert.equal(untouched.out.status, 200);
+  assert.equal((await store.get("C6"))?.debateRounds, 3, "editing standing orders must not clear the ceiling");
+
+  const cleared = makeCtx({
+    contexts: ["channel:C6"],
+    store,
+    body: { principalId: "alice", scope: "channel:C6", orders: "new orders", bots: {}, debateRounds: null },
+  });
+  await setContextPolicy(cleared.ctx);
+  assert.equal(cleared.out.status, 200);
+  assert.equal((cleared.out.body as any).policy.debateRounds, null);
+  assert.equal((await store.get("C6"))?.debateRounds, undefined, "null clears back to the org default");
+});
+
+test("debateRounds validation is core's, not the caller's, and a rejection changes nothing", async () => {
+  const store = createMemoryChannelPolicyStore();
+  await store.set("C7", "", { setBy: "alice", debateRounds: 3 });
+  for (const bad of [0, 21, 2.5, "three"]) {
+    const ctx = makeCtx({
+      contexts: ["channel:C7"],
+      store,
+      body: { principalId: "alice", scope: "channel:C7", orders: "", bots: {}, debateRounds: bad },
+    });
+    await setContextPolicy(ctx.ctx);
+    assert.equal(ctx.out.status, 400, `debateRounds ${JSON.stringify(bad)} must be refused`);
+  }
+  assert.equal((await store.get("C7"))?.debateRounds, 3);
+
+  // The member route must not become a way around the membership check for this field.
+  const outsider = makeCtx({
+    contexts: [],
+    store,
+    body: { principalId: "mallory", scope: "channel:C7", orders: "", bots: {}, debateRounds: 20 },
+  });
+  await setContextPolicy(outsider.ctx);
+  assert.equal(outsider.out.status, 403);
+  assert.equal((await store.get("C7"))?.debateRounds, 3);
+});
+
 test("a stale baseUpdatedAt bounces instead of reverting a concurrent edit", async () => {
   const store = createMemoryChannelPolicyStore();
   await store.set("C3", "v1", { setBy: "agent" });
