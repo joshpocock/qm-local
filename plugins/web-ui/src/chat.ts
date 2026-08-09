@@ -97,6 +97,7 @@ import { backgroundLabel, clearWorking, conversationBackground, markWorking } fr
 import { liveTurnThreadRef } from "./working-dot";
 import { newChatDraftKey, saveDraft, storedDraft } from "./drafts";
 import { applyPendingRoom, ensureRoomPersonas, personaAuthorChip, personaDotStack, roomRosterChips } from "./rooms";
+import { channelRoundsApplies, channelRoundsControl, loadChannelRounds, resetChannelRounds } from "./channel-rounds";
 import {
   defaultRoomNameFor,
   isRoomThread,
@@ -777,6 +778,12 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
                   : "This conversation is read-only here."
               }
             </div>
+            ${
+              // The one thing a member can change about a mirrored Slack channel: how many
+              // rounds a debate here is allowed to run. Sits directly under the header banner
+              // because that is where the eye already is; everything else stays read-only.
+              channelRoundsApplies(s) ? channelRoundsControl(s.scopeId) : nothing
+            }
             ${backgroundActivityStrip()}
             <section class="chat-scroll readonly-scroll">
               <!-- data-mention-thread (MENTION_THREAD_ATTR) names the thread a chip resolves
@@ -834,6 +841,10 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
         host,
       );
     readonlyRedraw = draw;
+    // Loads (or, on a re-mount of the same channel, no-ops) before the first paint's redraw,
+    // so the control fills in as soon as the policy lands rather than on the next interaction.
+    if (channelRoundsApplies(s)) void loadChannelRounds(s.scopeId, () => readonlyRedraw?.());
+    else resetChannelRounds();
     draw();
     container.replaceChildren(host);
     readOnlyView = { id: s.id, threadRef: s.threadRef, session: s, anchorSeq };

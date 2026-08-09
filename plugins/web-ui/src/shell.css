@@ -2703,6 +2703,46 @@ body.resizing-sidebar {
   text-decoration: underline;
   text-underline-offset: 2px;
 }
+
+/* The one writable control on a mirrored Slack channel: its debate-rounds ceiling. Sits
+   directly under the header banner, in the same strip width, so it reads as part of the
+   channel's identity rather than as a stray setting. */
+.channel-rounds {
+  width: min(var(--content-w), calc(100% - 32px));
+  margin: 8px auto 0;
+  padding: 7px 13px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--background);
+  font-size: 13px;
+}
+.channel-rounds-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted-foreground);
+}
+.channel-rounds-summary {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.channel-rounds-status {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.channel-rounds-status.error {
+  color: var(--destructive, #c0392b);
+}
+.channel-rounds-input:focus-visible,
+.channel-rounds select:focus-visible {
+  outline: 2px solid var(--primary, #d99a21);
+  outline-offset: 2px;
+}
 .readonly-scroll {
   padding-top: 20px;
 }

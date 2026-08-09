@@ -19,7 +19,13 @@ interface Call {
 }
 
 const calls: Call[] = [];
-const policy = { orders: "flag launches", bots: { "General Agent": { mode: "ignore" } }, updatedAt: 42 };
+const policy = {
+  orders: "flag launches",
+  bots: { "General Agent": { mode: "ignore" } },
+  debateRounds: 3,
+  defaultDebateRounds: 1,
+  updatedAt: 42,
+};
 const core = createServer((req: IncomingMessage, res) => {
   let raw = "";
   req.on("data", (chunk) => (raw += chunk));
@@ -84,4 +90,47 @@ test("PUT relays orders, bots, and the conflict snapshot under the signed-in pri
   assert.equal(call.body.orders, "watch deploys");
   assert.deepEqual(call.body.bots, { "General Agent": { mode: "rollup", rollupHours: 4 } });
   assert.equal(call.body.baseUpdatedAt, 42);
+});
+
+/**
+ * The debate-rounds ceiling rides this same proxy rather than a second endpoint: it lives in the
+ * same `channel_policy` row, and this is the one channel-policy path a member (not an admin) can
+ * reach. The three-state relay below is the whole contract — omitted preserves, null clears, a
+ * number narrows — so a rounds edit and a standing-orders edit never overwrite each other.
+ */
+test("GET carries the channel's rounds override and the default it would inherit", async () => {
+  const r = await fetch(`${base}/api/contexts/${encodeURIComponent("channel:C1")}/ambient-policy`, { headers });
+  const got = ((await r.json()) as { policy: Record<string, unknown> }).policy;
+  assert.equal(got.debateRounds, 3);
+  assert.equal(got.defaultDebateRounds, 1);
+});
+
+test("PUT relays a rounds override, and a null that clears it", async () => {
+  for (const [sent, expected] of [
+    [5, 5],
+    [null, null],
+  ] as const) {
+    const before = calls.length;
+    const r = await fetch(`${base}/api/contexts/${encodeURIComponent("channel:C1")}/ambient-policy`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ orders: "watch deploys", bots: {}, debateRounds: sent, baseUpdatedAt: 42 }),
+    });
+    assert.equal(r.status, 200);
+    const call = calls[before]!;
+    assert.ok("debateRounds" in call.body, "the key must survive the hop, including when it is null");
+    assert.equal(call.body.debateRounds, expected);
+  }
+});
+
+test("a PUT that never mentions rounds leaves the channel's override alone", async () => {
+  const before = calls.length;
+  await fetch(`${base}/api/contexts/${encodeURIComponent("channel:C1")}/ambient-policy`, {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({ orders: "watch deploys", bots: {}, baseUpdatedAt: 42 }),
+  });
+  // Forwarding `debateRounds: undefined` would serialise the key away anyway, but forwarding it
+  // as null would silently clear a ceiling every time someone edited standing orders.
+  assert.ok(!("debateRounds" in calls[before]!.body), "the key is absent, not null");
 });

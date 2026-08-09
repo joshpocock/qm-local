@@ -1,5 +1,7 @@
 import { parseScopeId } from "../../types.ts";
-import { parseBotLedger } from "../../surface-cache/channel-policy-store.ts";
+import { parseBotLedger, parseDebateRounds } from "../../surface-cache/channel-policy-store.ts";
+import { resolveSlackPanelRounds } from "../../slack/config.ts";
+import type { ServerDeps } from "../deps.ts";
 import { sendJson } from "../http.ts";
 import { audit, isObj } from "./shared.ts";
 import { type ApiCtx, type Route } from "./route.ts";
@@ -9,6 +11,20 @@ const MAX_ORDERS_CHARS = 20_000;
 function channelContainer(scope: string): string | undefined {
   const { kind, ref } = parseScopeId(scope);
   return ref && (kind === "channel" || kind === "group") ? ref : undefined;
+}
+
+/**
+ * The debate-rounds ceiling a channel with no override of its own follows: the admin setting on
+ * the Slack installation, then `QM_SLACK_PANEL_ROUNDS`, then 1 — the same resolution the plugin
+ * does at start-up. Reported alongside the channel value so a UI can say "3 rounds · org default"
+ * rather than leaving someone to guess what a blank override is inheriting.
+ *
+ * Lives here (not in the admin resource that also reports it) so the member-facing carrier owns
+ * the definition and the admin card imports it — one answer, two placements.
+ */
+export async function defaultDebateRounds(deps: ServerDeps): Promise<number> {
+  const stored = await deps.slackInstallation?.get().catch(() => undefined);
+  return resolveSlackPanelRounds(stored?.panelRounds, process.env);
 }
 
 async function memberScope(ctx: ApiCtx, principalId: string, scope: string): Promise<boolean> {
@@ -37,6 +53,8 @@ export async function getContextPolicy(ctx: ApiCtx): Promise<void> {
       orders: p?.orders ?? "",
       bots: p?.bots ?? {},
       ambientEnabled: p?.ambientEnabled ?? null,
+      debateRounds: p?.debateRounds ?? null,
+      defaultDebateRounds: await defaultDebateRounds(deps),
       updatedAt: p?.updatedAt ?? 0,
     },
   });
@@ -72,6 +90,10 @@ export async function setContextPolicy(ctx: ApiCtx): Promise<void> {
       error: "bad_request",
       message: "ambientEnabled must be a boolean or null (null = default rule)",
     });
+  // Omitting the key leaves the stored override alone; sending null clears it back to the org
+  // default. Only a whole number in range narrows this channel.
+  const rounds = b.debateRounds === undefined ? undefined : parseDebateRounds(b.debateRounds);
+  if (rounds && "error" in rounds) return sendJson(res, 400, { error: "bad_request", message: rounds.error });
   const current = await deps.channelPolicy.get(container);
   if (typeof b.baseUpdatedAt === "number" && (current?.updatedAt ?? 0) !== b.baseUpdatedAt) {
     return sendJson(res, 409, {
@@ -83,10 +105,18 @@ export async function setContextPolicy(ctx: ApiCtx): Promise<void> {
     setBy: principalId,
     bots: parsed.bots,
     ambientEnabled: b.ambientEnabled as boolean | null | undefined,
+    ...(rounds ? { debateRounds: rounds.debateRounds } : {}),
   });
   audit(deps, { principalId, action: "surface.policy.set", resource: container, scopeLabel: scope });
   return sendJson(res, 200, {
-    policy: { orders: p.orders, bots: p.bots, ambientEnabled: p.ambientEnabled ?? null, updatedAt: p.updatedAt },
+    policy: {
+      orders: p.orders,
+      bots: p.bots,
+      ambientEnabled: p.ambientEnabled ?? null,
+      debateRounds: p.debateRounds ?? null,
+      defaultDebateRounds: await defaultDebateRounds(deps),
+      updatedAt: p.updatedAt,
+    },
   });
 }
 
