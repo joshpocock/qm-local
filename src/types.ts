@@ -539,6 +539,17 @@ export interface TurnResult {
   runId?: string;
   steered?: true;
   stopped?: boolean;
+  /**
+   * The turn put at least one real message on the surface itself (a `post`/`reach`, or the
+   * shed-reply delivery that stands in for one) rather than handing text back as `reply`.
+   *
+   * Only ever set alongside `status: "silent"`, which is what a spine-routed surface turn
+   * always returns: the agent speaks through the surface tools, so there is no reply to carry.
+   * Without this flag an agent that argued at length and one that said nothing are the same
+   * result, and the panel driver reads both as a quiet turn — which is what ended every Slack
+   * debate after round 1. `posted` is the difference.
+   */
+  posted?: boolean;
   pendingApprovals?: PendingApproval[];
   attachments?: OutgoingAttachment[];
   sourceUserSeq?: number;

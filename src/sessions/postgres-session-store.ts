@@ -686,7 +686,11 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
     },
 
     async distinctScopes(): Promise<DistinctScope[]> {
-      const rows = await q("SELECT scope_id, MAX(channel_name) AS channel_name FROM sessions GROUP BY scope_id");
+      // A DM's `channel_name` is its counterpart (who it is with), not a room — labelling a
+      // personal scope `#qm-cc` from it would name someone's scope after a bot that DMed them.
+      const rows = await q(
+        "SELECT scope_id, MAX(channel_name) FILTER (WHERE type <> 'dm') AS channel_name FROM sessions GROUP BY scope_id",
+      );
       return rows.map((r) => ({
         scopeId: r.scope_id as ScopeId,
         ...(r.channel_name != null ? { channelName: r.channel_name as string } : {}),

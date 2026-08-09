@@ -52,6 +52,11 @@ export interface PanelTurnSpec {
 export interface PanelTurnOutcome {
   status?: string;
   reply?: string;
+  /**
+   * The turn posted a real message to the surface itself instead of returning it as `reply`.
+   * Mirrors `TurnResult.posted`; only meaningful on a `silent` outcome.
+   */
+  posted?: boolean;
 }
 
 export interface PanelRunOptions {
@@ -91,12 +96,19 @@ export function isPanelPass(reply: string | undefined): boolean {
  * text never rides back. Treating that as "not a PASS" is what made a settled Slack room grind
  * through every round it had, and what let a quiet turn invite bonus turns it never asked for.
  *
+ * But `silent` alone cannot tell the two apart: on that path the persona that argued at length
+ * and the persona that had nothing to say return the SAME result, so every Slack round read as
+ * 100% quiet and the panel exited after round 1 however many rounds the room was given. The
+ * orchestrator therefore flags a silent turn that actually put a message on the surface with
+ * `posted`, and that one is not quiet. Silent-and-posted-nothing still is, so a settled room
+ * still ends early.
+ *
  * A turn that FAILED or was REFUSED is deliberately not quiet: it said nothing because it
  * broke, and a broken agent must not be read as a settled one.
  */
 export function isPanelQuiet(result: PanelTurnOutcome | undefined): boolean {
   if (!result) return true;
-  if (result.status === "silent") return true;
+  if (result.status === "silent") return result.posted !== true;
   if (result.status !== undefined && result.status !== "ok") return false;
   return isPanelPass(result.reply) || (result.reply ?? "").trim() === "";
 }

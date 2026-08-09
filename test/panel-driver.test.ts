@@ -203,6 +203,80 @@ test("a silent-status turn is quiet: an all-silent round ends the panel and invi
   assert.equal(isPanelQuiet(undefined), true);
 });
 
+test("a silent turn that POSTED is not quiet; a silent turn that posted nothing still is", async () => {
+  // Every spine-routed turn (Slack channels) comes back `silent` with no reply, whether the
+  // persona argued for a paragraph or said nothing at all. `posted` is the only thing that
+  // tells them apart, and without it every Slack round read as 100% quiet.
+  assert.equal(isPanelQuiet({ status: "silent", posted: true }), false, "it spoke — through the surface");
+  assert.equal(isPanelQuiet({ status: "silent", posted: false }), true, "it posted nothing");
+  assert.equal(isPanelQuiet({ status: "silent" }), true, "no flag at all is the old, quiet shape");
+  assert.equal(
+    isPanelQuiet({ status: "ok", reply: PANEL_PASS, posted: true }),
+    true,
+    "an explicit PASS is quiet however it travelled",
+  );
+});
+
+test("a Slack-shaped room (every turn silent+posted) runs its whole round budget", async () => {
+  const taken: PanelTurnSpec[] = [];
+  await runPanel({
+    members: [ALICE, BRAVO],
+    rounds: 2,
+    text: "debate this",
+    state: { abort: false },
+    run: async (spec) => {
+      taken.push(spec);
+      return { status: "silent", posted: true };
+    },
+  });
+
+  assert.deepEqual(
+    taken.map((t) => `${t.persona.name}@${t.round}`),
+    ["Alfa@1", "Bravo@1", "Alfa@2", "Bravo@2"],
+    "two personas x two rounds — the round-1 stop was the bug",
+  );
+});
+
+test("a Slack round where nobody posted still ends the panel early", async () => {
+  const taken: PanelTurnSpec[] = [];
+  await runPanel({
+    members: [ALICE, BRAVO],
+    rounds: 5,
+    text: "anything left?",
+    state: { abort: false },
+    run: async (spec) => {
+      taken.push(spec);
+      return { status: "silent" };
+    },
+  });
+
+  assert.deepEqual(
+    taken.map((t) => `${t.persona.name}@${t.round}`),
+    ["Alfa@1", "Bravo@1"],
+    "a settled room does not grind through the rounds it was given",
+  );
+});
+
+test("one persona posting keeps a Slack room open even when the other stays quiet", async () => {
+  const taken: PanelTurnSpec[] = [];
+  await runPanel({
+    members: [ALICE, BRAVO],
+    rounds: 2,
+    text: "go",
+    state: { abort: false },
+    run: async (spec) => {
+      taken.push(spec);
+      return spec.persona.name === "Alfa" ? { status: "silent", posted: true } : { status: "silent" };
+    },
+  });
+
+  assert.deepEqual(
+    taken.map((t) => `${t.persona.name}@${t.round}`),
+    ["Alfa@1", "Bravo@1", "Alfa@2", "Bravo@2"],
+    "one voice still talking keeps the room open on the surface path too",
+  );
+});
+
 test("a round with one PASS and one substantive reply continues to the next round", async () => {
   const s = scripted({ Alfa: PANEL_PASS, Bravo: "there is still the pricing table" });
   await runPanel({ members: [ALICE, BRAVO], rounds: 2, text: "go", state: { abort: false }, run: s.run });

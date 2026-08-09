@@ -33,6 +33,7 @@ export {
   mentionsBot,
   mentionsSiblingBot,
   threadHasBotStake,
+  isSelfOrSiblingAuthored,
   shouldProcessMessage,
   isGroupMembershipMessage,
   channelPrivacyChange,

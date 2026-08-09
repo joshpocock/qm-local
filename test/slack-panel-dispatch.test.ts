@@ -170,6 +170,13 @@ class FakeCore implements SlackCoreClient {
   async ingestSurfaceEvents(events: any[]): Promise<void> {
     this.ingested.push(...events);
   }
+  /** Per-channel debate-rounds overrides; absent means "follow the admin default". */
+  readonly debateRoundsByChannel = new Map<string, number>();
+  readonly debateRoundsReads: string[] = [];
+  async channelDebateRounds(container: string): Promise<number | undefined> {
+    this.debateRoundsReads.push(container);
+    return this.debateRoundsByChannel.get(container);
+  }
   async submitTurn(body: any): Promise<TurnResult> {
     this.turns.push(body);
     return this.result;
@@ -645,6 +652,90 @@ test("an explicit mention of THIS bot still runs, even alongside a sibling's", a
 
     await f.of(DEFAULT_BOT).mention(mention("<@UQM> just you then", "803.2"));
     assert.equal(f.core.turns.length, 2);
+  } finally {
+    await f.stop();
+  }
+});
+
+// --- a persona's own reply echoed back as an app_mention ------------------------------------
+
+/**
+ * A panel reply as Slack re-delivers it: the driver renders the next persona as a real `<@U…>`
+ * pill, and Slack fans an `app_mention` out to every app named in the text — including the qm
+ * bot that wrote it and the qm bot it names.
+ */
+const botMention = (author: BotSpec, text: string, ts: string, threadTs?: string) => ({
+  channel: "C1",
+  user: author.userId,
+  bot_id: author.botId,
+  text,
+  ts,
+  ...(threadTs ? { thread_ts: threadTs } : {}),
+});
+
+test("a persona's panel reply echoed back as an app_mention never dispatches a turn", async () => {
+  // The regression: Critic's round-1 reply names Scout as a pill, so Slack delivered an
+  // app_mention to Scout's instance (and to Critic's own). That echo dispatched an ADDRESSED
+  // turn on the panel's threadRef, which core folded into the persona run still in flight as a
+  // mid-turn steer — the run then answered its own echo and sat open until the turn wall clock
+  // expired, so the panel, blocked awaiting it, never reached round 2.
+  const f = await fleet([SCOUT, CRITIC], 2);
+  try {
+    f.core.result = { status: "ok", reply: "opening", panelPersona: { id: "p-critic", name: "Critic" } };
+    await f.of(SCOUT).mention(mention("<@USCOUT> <@UCRITIC> debate this", "900.1"));
+    assert.equal(f.core.turns.length, 1, "the human message is the only dispatch so far");
+
+    const echo = botMention(CRITIC, "_1/2: my case_ — <@USCOUT>, your move.", "900.2", "900.1");
+    // Every instance that can see it: the sibling it names, and the author's own.
+    await f.of(SCOUT).mention(echo);
+    await f.of(CRITIC).mention(echo);
+
+    assert.equal(f.core.turns.length, 1, "a sibling qm bot's post is an echo, not somebody addressing this bot");
+    assert.equal(f.of(SCOUT).client.posts.length, 0, "and nothing is said about it either");
+  } finally {
+    await f.stop();
+  }
+});
+
+test("a genuine human reply on a panel thread still dispatches exactly as before", async () => {
+  const f = await fleet([SCOUT, CRITIC], 2);
+  try {
+    f.core.result = { status: "ok", reply: "opening", panelPersona: { id: "p-critic", name: "Critic" } };
+    await f.of(SCOUT).mention(mention("<@USCOUT> <@UCRITIC> debate this", "901.1"));
+    assert.equal(f.core.turns.length, 1);
+
+    // The steer/interrupt semantics a person gets mid-debate are deliberate and must survive.
+    await f.of(SCOUT).mention({ ...mention("<@USCOUT> actually, narrow it to CSS", "901.2"), thread_ts: "901.1" });
+
+    assert.equal(f.core.turns.length, 2, "a person on the thread is still heard mid-panel");
+    assert.deepEqual(f.core.turns[1].room, { personaIds: ["p-scout"], rounds: 1 });
+    assert.equal(f.core.turns[1].conversation.threadRef, f.core.turns[0].conversation.threadRef);
+    assert.equal(f.core.turns[1].liveActor, true, "and it is an addressed turn, not an echo");
+  } finally {
+    await f.stop();
+  }
+});
+
+test("a third-party bot that @mentions the bot is untouched by the sibling gate", async () => {
+  const f = await fleet([DEFAULT_BOT, SCOUT]);
+  try {
+    // GitHub, PagerDuty and friends are not qm bots, so nothing about them moved.
+    for (const bot of [f.of(DEFAULT_BOT), f.of(SCOUT)]) {
+      bot.client.usersById.set("UGITHUB", {
+        ...internalUser("UGITHUB", "GitHub"),
+        is_bot: true,
+      });
+      bot.client.membersByChannel.set("C1", ["U1", "UGITHUB", "UQM", "USCOUT"]);
+    }
+    await f.of(DEFAULT_BOT).mention({
+      channel: "C1",
+      user: "UGITHUB",
+      bot_id: "BGITHUB",
+      text: "<@UQM> deploy failed on main",
+      ts: "902.1",
+    });
+
+    assert.equal(f.core.turns.length, 1, "a third-party bot naming this bot still runs a turn");
   } finally {
     await f.stop();
   }

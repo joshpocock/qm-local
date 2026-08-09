@@ -234,6 +234,9 @@ class FakeCore implements SlackCoreClient {
   async ingestSurfaceEvents(events: any[]): Promise<void> {
     this.ingests.push(events);
   }
+  async channelDebateRounds(): Promise<number | undefined> {
+    return undefined;
+  }
   async submitTurn(body: any): Promise<TurnResult> {
     this.turns.push(body);
     if (this.submitError) throw this.submitError;

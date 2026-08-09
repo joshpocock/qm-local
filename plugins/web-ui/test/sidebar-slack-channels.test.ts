@@ -39,6 +39,8 @@ interface SessionsModule {
   renderList: () => void;
   sessionsState: { list: CoreSession[]; collapsedSlackChannels: Set<string> };
   contextsState: { list: CoreContext[] };
+  defaultSessionTitle: (s: CoreSession) => string;
+  sessionTitle: (s: CoreSession) => string;
 }
 
 async function withSidebar(run: (mod: SessionsModule) => Promise<void> | void) {
@@ -205,6 +207,48 @@ test("Slack DMs stay flat, keeping their place in the section's recency order", 
     )!;
     assert.ok(dmRow.querySelector(".private-chip"), "a DM still says it is private");
     assert.equal(dmRow.classList.contains("project-child"), false, "and it is not nested");
+  });
+});
+
+test("a mirrored Slack DM is named after who it is with, not after what was said in it", async () => {
+  await withSidebar(async ({ renderList, sessionsState, defaultSessionTitle, sessionTitle }) => {
+    // The surface records the DM's counterpart in `channelName` the way a channel records
+    // `#name`; the title is whatever the model made of the conversation. Slack's own sidebar
+    // says who the DM is with, so this one does too.
+    const dm = saved("dm1", "dm:D0BN3J86W4S", {
+      type: "dm",
+      channelName: "qm-cc",
+      title: "Set up Slack keychain, pick voice",
+      lastActivityAt: 35,
+    });
+    const unnamed = saved("dm2", "dm:D0BNCUJ2WS3", { type: "dm", title: "Some auto title", lastActivityAt: 34 });
+    sessionsState.list = [dm, unnamed, thread("g1", "C0GEN", "1.1", 50, "General thread", "general")];
+    renderList();
+    assert.deepEqual(slackShape(), [
+      "channel:#general",
+      "  thread:General thread",
+      "row:qm-cc",
+      "row:Some auto title",
+    ]);
+    assert.equal(sessionTitle(dm), "qm-cc", "the counterpart outranks a generated title");
+    assert.equal(defaultSessionTitle(dm), "qm-cc");
+    assert.equal(defaultSessionTitle(unnamed), "Direct message", "no counterpart known yet: unchanged");
+    // Naming the row does not turn it into a channel: no `#`, and no `#name` context chip.
+    const dmRow = [...document.querySelectorAll(".session-row")].find(
+      (el) => el.querySelector(".tl")?.textContent?.trim() === "qm-cc",
+    )!;
+    assert.equal(dmRow.querySelector(".row-context"), null, "a person is not a room to sit inside");
+    assert.ok(dmRow.querySelector(".private-chip"), "and it still says it is private");
+  });
+});
+
+test("a web chat and a Slack channel are untouched by DM naming", async () => {
+  await withSidebar(async ({ defaultSessionTitle, sessionTitle }) => {
+    const web = saved("w1", "web:u:default", { type: "dm", title: null });
+    assert.equal(defaultSessionTitle(web), "Web chat", "a web chat is a `dm` row too, and stays a web chat");
+    const channel = thread("g1", "C0GEN", "1.1", 10, "General thread", "general");
+    assert.equal(sessionTitle(channel), "General thread");
+    assert.equal(defaultSessionTitle(channel), "#general");
   });
 });
 

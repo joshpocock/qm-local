@@ -215,8 +215,12 @@ export async function conversationLabelFor(
   conversationScope: ScopeId,
   channelName: string | undefined,
 ): Promise<string | undefined> {
-  if (channelName) return `#${channelName}`;
   const { kind, ref } = parseScopeId(conversationScope);
+  // A DM hangs off a personal scope and carries its counterpart's name in `channelName` (see
+  // the Slack turn handler). "said in #qm-cc" would be a lie about where a memory came from —
+  // a DM has no room to name, which is what the undefined here has always meant.
+  if (kind === "personal") return undefined;
+  if (channelName) return `#${channelName}`;
   if (kind !== "channel" || !directory) return undefined;
   const resolved = await directory.resolveChannel(ref).catch(() => ({ kind: "none" as const }));
   return resolved.kind === "one" && resolved.channel.channelId.toLowerCase() === ref.toLowerCase()

@@ -158,6 +158,32 @@ test(
   },
 );
 
+test(
+  "pg channel-policy: debateRounds tri-state — unset default, round-trip, omitted preserved, null clears",
+  { skip },
+  async () => {
+    const store = createPostgresChannelPolicyStore(URL!);
+    try {
+      await store.set("CPD1", "watch", { setBy: "U-admin" });
+      assert.equal((await store.get("CPD1"))?.debateRounds, undefined, "unset by default");
+      await store.set("CPD1", "watch", { setBy: "U-admin", debateRounds: 4 });
+      assert.equal((await store.get("CPD1"))?.debateRounds, 4);
+      await store.set("CPD1", "watch more");
+      assert.equal((await store.get("CPD1"))?.debateRounds, 4, "omitted arg leaves the override unchanged");
+      await store.set("CPD1", "watch more", { debateRounds: null });
+      assert.equal((await store.get("CPD1"))?.debateRounds, undefined, "null clears back to the admin default");
+      const h = await store.history("CPD1");
+      assert.deepEqual(
+        h.map((r) => r.debateRounds),
+        [undefined, 4, 4, undefined].reverse(),
+        "revisions record the ceiling",
+      );
+    } finally {
+      await store.close();
+    }
+  },
+);
+
 test("pg channel-policy: history appends a revision per set with provenance", { skip }, async () => {
   const store = createPostgresChannelPolicyStore(URL!);
   try {

@@ -24,7 +24,8 @@ import {
   type PublicServiceCredential,
   type ServiceCredentialInput,
 } from "../../credentials/keychain.ts";
-import { parseBotLedger } from "../../surface-cache/channel-policy-store.ts";
+import { parseBotLedger, parseDebateRounds } from "../../surface-cache/channel-policy-store.ts";
+import { resolveSlackPanelRounds } from "../../slack/config.ts";
 import { authorizeUrl, PROVIDERS, type ConsentMode } from "../../connectors/oauth.ts";
 import { resolverFor } from "./connectors.ts";
 import { encodeRef, serviceCredRef } from "../../acl/resource-ref.ts";
@@ -84,6 +85,17 @@ const MAX_SOUL_CHARS = 100_000;
 function channelContainer(scope: string): string | undefined {
   const { kind, ref } = parseScopeId(scope);
   return ref && (kind === "channel" || kind === "group") ? ref : undefined;
+}
+
+/**
+ * The debate-rounds ceiling a channel with no override of its own follows: the admin setting on
+ * the Slack installation, then `QM_SLACK_PANEL_ROUNDS`, then 1 — the same resolution the plugin
+ * does at start-up. Reported alongside the channel value so the admin UI can label a blank
+ * override "default (N)" instead of leaving an operator to guess what they are narrowing.
+ */
+async function defaultDebateRounds(deps: ServerDeps): Promise<number> {
+  const stored = await deps.slackInstallation?.get().catch(() => undefined);
+  return resolveSlackPanelRounds(stored?.panelRounds, process.env);
 }
 
 export const ADMIN_RESOURCES: readonly AdminResource[] = [
@@ -176,6 +188,8 @@ export const ADMIN_RESOURCES: readonly AdminResource[] = [
         orders: p?.orders ?? "",
         bots: p?.bots ?? {},
         ambientEnabled: p?.ambientEnabled ?? null,
+        debateRounds: p?.debateRounds ?? null,
+        defaultDebateRounds: await defaultDebateRounds(deps),
         updatedAt: p?.updatedAt ?? 0,
       };
     },
@@ -188,6 +202,7 @@ export const ADMIN_RESOURCES: readonly AdminResource[] = [
         orders?: unknown;
         bots?: unknown;
         ambientEnabled?: unknown;
+        debateRounds?: unknown;
         baseUpdatedAt?: unknown;
       };
       if (typeof b.orders !== "string") return { error: "ambient-policy requires { orders: string }" };
@@ -199,6 +214,10 @@ export const ADMIN_RESOURCES: readonly AdminResource[] = [
       if ("error" in parsed) return { error: parsed.error };
       if (b.ambientEnabled !== undefined && b.ambientEnabled !== null && typeof b.ambientEnabled !== "boolean")
         return { error: "ambientEnabled must be a boolean or null (null = default rule)" };
+      // Omitting the key leaves the stored override alone; sending null clears it back to the
+      // admin default. Only a whole number in range narrows this channel.
+      const rounds = b.debateRounds === undefined ? undefined : parseDebateRounds(b.debateRounds);
+      if (rounds && "error" in rounds) return { error: rounds.error };
       const current = await deps.channelPolicy.get(ref);
       if (typeof b.baseUpdatedAt === "number" && (current?.updatedAt ?? 0) !== b.baseUpdatedAt) {
         return {
@@ -211,6 +230,7 @@ export const ADMIN_RESOURCES: readonly AdminResource[] = [
         setBy: actor.id,
         bots: parsed.bots,
         ambientEnabled: b.ambientEnabled as boolean | null | undefined,
+        ...(rounds ? { debateRounds: rounds.debateRounds } : {}),
       });
       audit(ctx.deps, { principalId: actor.id, action: "surface.policy.set", resource: ref, scopeLabel: scope });
       return { ok: true };

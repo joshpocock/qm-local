@@ -1,5 +1,6 @@
 import { orgId as configOrgId } from "../config.ts";
 import { createPgPool } from "../persistence/pg-pool.ts";
+import { ROOM_MAX_ROUNDS } from "../types.ts";
 
 export const BOT_MODES = ["ignore", "rollup", "action", "user"] as const;
 export const DEFAULT_ROLLUP_HOURS = 24;
@@ -37,11 +38,30 @@ export function parseBotLedger(input: unknown): { bots: Record<string, BotPolicy
   return { bots: { ...bots } };
 }
 
+/**
+ * Per-channel ceiling on multi-bot debate rounds. Same tri-state shape as `ambientEnabled`:
+ * a whole number in `1..ROOM_MAX_ROUNDS` narrows the admin default for this channel, `null`
+ * (or blank) clears the override so the admin default applies again, and omitting the field
+ * entirely leaves whatever is stored alone.
+ */
+export function parseDebateRounds(input: unknown): { debateRounds: number | null } | { error: string } {
+  if (input === null || input === undefined || input === "") return { debateRounds: null };
+  const n = typeof input === "number" ? input : typeof input === "string" ? Number(input.trim()) : NaN;
+  if (!Number.isInteger(n) || n < 1 || n > ROOM_MAX_ROUNDS) {
+    return {
+      error: `debateRounds must be a whole number from 1 to ${ROOM_MAX_ROUNDS} (null clears the channel override)`,
+    };
+  }
+  return { debateRounds: n };
+}
+
 export interface ChannelPolicy {
   container: string;
   orders: string;
   bots: Record<string, BotPolicy>;
   ambientEnabled?: boolean;
+  /** Channel override for the debate-rounds ceiling; absent means "follow the admin default". */
+  debateRounds?: number;
   setBy?: string;
   updatedAt: number;
 }
@@ -51,6 +71,7 @@ interface ChannelPolicyRevision {
   orders: string;
   bots?: Record<string, BotPolicy>;
   ambientEnabled?: boolean;
+  debateRounds?: number;
   setBy?: string;
   sessionId?: string;
   createdAt: number;
@@ -61,7 +82,13 @@ export interface ChannelPolicyStore {
   set(
     container: string,
     orders: string,
-    opts?: { setBy?: string; bots?: Record<string, BotPolicy>; sessionId?: string; ambientEnabled?: boolean | null },
+    opts?: {
+      setBy?: string;
+      bots?: Record<string, BotPolicy>;
+      sessionId?: string;
+      ambientEnabled?: boolean | null;
+      debateRounds?: number | null;
+    },
   ): Promise<ChannelPolicy>;
   history(container: string, limit?: number): Promise<ChannelPolicyRevision[]>;
   list(): Promise<ChannelPolicy[]>;
@@ -83,6 +110,7 @@ export function createPostgresChannelPolicyStore(connectionString: string): Chan
     `ALTER TABLE channel_policy ADD COLUMN IF NOT EXISTS ambient_enabled BOOLEAN`,
     `ALTER TABLE channel_policy ALTER COLUMN ambient_enabled DROP NOT NULL`,
     `ALTER TABLE channel_policy ALTER COLUMN ambient_enabled DROP DEFAULT`,
+    `ALTER TABLE channel_policy ADD COLUMN IF NOT EXISTS debate_rounds INTEGER`,
     `CREATE TABLE IF NOT EXISTS channel_policy_history(
         id BIGSERIAL PRIMARY KEY,
         org_id TEXT NOT NULL, container TEXT NOT NULL,
@@ -91,6 +119,7 @@ export function createPostgresChannelPolicyStore(connectionString: string): Chan
       )`,
     `ALTER TABLE channel_policy_history ADD COLUMN IF NOT EXISTS bots JSONB`,
     `ALTER TABLE channel_policy_history ADD COLUMN IF NOT EXISTS ambient_enabled BOOLEAN`,
+    `ALTER TABLE channel_policy_history ADD COLUMN IF NOT EXISTS debate_rounds INTEGER`,
     `CREATE INDEX IF NOT EXISTS channel_policy_history_container
         ON channel_policy_history(org_id, container, id DESC)`,
   ]);
@@ -99,6 +128,7 @@ export function createPostgresChannelPolicyStore(connectionString: string): Chan
     orders: (r.orders as string) ?? "",
     bots: (r.bots as Record<string, BotPolicy>) ?? {},
     ...(r.ambient_enabled != null ? { ambientEnabled: r.ambient_enabled as boolean } : {}),
+    ...(r.debate_rounds != null ? { debateRounds: Number(r.debate_rounds) } : {}),
     ...(r.set_by != null ? { setBy: r.set_by as string } : {}),
     updatedAt: Number(r.updated_at),
   });
@@ -107,6 +137,7 @@ export function createPostgresChannelPolicyStore(connectionString: string): Chan
     orders: (r.orders as string) ?? "",
     ...(r.bots != null ? { bots: r.bots as Record<string, BotPolicy> } : {}),
     ...(r.ambient_enabled != null ? { ambientEnabled: r.ambient_enabled as boolean } : {}),
+    ...(r.debate_rounds != null ? { debateRounds: Number(r.debate_rounds) } : {}),
     ...(r.set_by != null ? { setBy: r.set_by as string } : {}),
     ...(r.session_id != null ? { sessionId: r.session_id as string } : {}),
     createdAt: Number(r.created_at),
@@ -120,16 +151,17 @@ export function createPostgresChannelPolicyStore(connectionString: string): Chan
       const now = Date.now();
       const rows = await q(
         `WITH up AS (
-           INSERT INTO channel_policy(org_id, container, orders, bots, ambient_enabled, set_by, updated_at)
-           VALUES ($1,$2,$3,COALESCE($4::jsonb,'{}'::jsonb),CASE WHEN $9 THEN $8::boolean END,$5,$6)
+           INSERT INTO channel_policy(org_id, container, orders, bots, ambient_enabled, debate_rounds, set_by, updated_at)
+           VALUES ($1,$2,$3,COALESCE($4::jsonb,'{}'::jsonb),CASE WHEN $9 THEN $8::boolean END,CASE WHEN $11 THEN $10::int END,$5,$6)
            ON CONFLICT (org_id, container) DO UPDATE SET orders = EXCLUDED.orders,
              bots = COALESCE($4::jsonb, channel_policy.bots),
              ambient_enabled = CASE WHEN $9 THEN $8::boolean ELSE channel_policy.ambient_enabled END,
+             debate_rounds = CASE WHEN $11 THEN $10::int ELSE channel_policy.debate_rounds END,
              set_by = EXCLUDED.set_by, updated_at = EXCLUDED.updated_at
            RETURNING *
          ), hist AS (
-           INSERT INTO channel_policy_history(org_id, container, orders, bots, ambient_enabled, set_by, session_id, created_at)
-           SELECT $1, $2, $3, up.bots, up.ambient_enabled, $5, $7, $6 FROM up
+           INSERT INTO channel_policy_history(org_id, container, orders, bots, ambient_enabled, debate_rounds, set_by, session_id, created_at)
+           SELECT $1, $2, $3, up.bots, up.ambient_enabled, up.debate_rounds, $5, $7, $6 FROM up
          )
          SELECT * FROM up`,
         [
@@ -142,6 +174,8 @@ export function createPostgresChannelPolicyStore(connectionString: string): Chan
           opts?.sessionId ?? null,
           opts?.ambientEnabled ?? null,
           opts?.ambientEnabled !== undefined,
+          opts?.debateRounds ?? null,
+          opts?.debateRounds !== undefined,
         ],
       );
       return row(rows[0]!);
@@ -173,11 +207,14 @@ export function createMemoryChannelPolicyStore(): ChannelPolicyStore {
       const now = Date.now();
       const ambientEnabled =
         opts?.ambientEnabled === undefined ? existing?.ambientEnabled : (opts.ambientEnabled ?? undefined);
+      const debateRounds =
+        opts?.debateRounds === undefined ? existing?.debateRounds : (opts.debateRounds ?? undefined);
       const p: ChannelPolicy = {
         container,
         orders,
         bots: opts?.bots ?? existing?.bots ?? {},
         ...(ambientEnabled !== undefined ? { ambientEnabled } : {}),
+        ...(debateRounds !== undefined ? { debateRounds } : {}),
         ...(opts?.setBy ? { setBy: opts.setBy } : {}),
         updatedAt: now,
       };
@@ -187,6 +224,7 @@ export function createMemoryChannelPolicyStore(): ChannelPolicyStore {
         orders,
         bots: p.bots,
         ...(p.ambientEnabled !== undefined ? { ambientEnabled: p.ambientEnabled } : {}),
+        ...(p.debateRounds !== undefined ? { debateRounds: p.debateRounds } : {}),
         ...(opts?.setBy ? { setBy: opts.setBy } : {}),
         ...(opts?.sessionId ? { sessionId: opts.sessionId } : {}),
         createdAt: now,

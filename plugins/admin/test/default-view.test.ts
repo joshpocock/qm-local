@@ -63,6 +63,26 @@ test("debate rounds are an admin setting on the same card, bounded, clearable, a
   assert.match(html, /Leave blank to use the deployment default/);
 });
 
+test("a channel can narrow the debate ceiling, and a blank override names the default it follows", () => {
+  // Lives on the channel-policy editor, next to the other per-channel gates.
+  assert.match(html, /<label for="debate-rounds">Debate rounds<\/label>/);
+  assert.match(html, /id="debate-rounds"/);
+  assert.match(html, /id="debate-rounds-default"/);
+  // Blank = no override: the placeholder names the admin default rather than reading "empty".
+  assert.match(html, /\$\("debate-rounds"\)\.placeholder = "Default \(" \+ roundsDefault \+ "\)"/);
+  assert.match(html, /typeof p\?\.defaultDebateRounds === "number" \? p\.defaultDebateRounds : 1/);
+  assert.match(html, /\$\("debate-rounds"\)\.value = typeof p\?\.debateRounds === "number"/);
+  // Bounded by the input itself and again before the request goes out, like the admin default.
+  assert.match(html, /!Number\.isInteger\(debateRounds\) \|\| debateRounds < 1 \|\| debateRounds > 20/);
+  assert.match(html, /const debateRounds = roundsRaw \? Number\(roundsRaw\) : null;/);
+  // Saved on the same request as the rest of the channel policy, so one Save means one write.
+  assert.match(html, /ambientEnabled: ambientSel === "default" \? null : ambientSel === "on",\s*\n\s*debateRounds,/);
+  // The hint states which way the layers narrow and that a PASS round still ends it early.
+  assert.match(html, /Leave blank\s*\n?\s*to follow the admin default/);
+  assert.match(html, /which this can only\s*\n?\s*narrow/);
+  assert.match(html, /agent passes ends the debate early/);
+});
+
 test("the admin page stays a single inline script, because the CSP hashes exactly one", () => {
   assert.equal(html.match(/<script/g)?.length, 1);
 });

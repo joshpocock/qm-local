@@ -44,6 +44,15 @@ const SURFACE_FILE_MAX_CHARS = 100_000;
 
 export interface SpineState {
   surfaceOutboundCount: number;
+  /**
+   * How many REAL messages this turn put on the surface — a `post` or a `reach` carrying text
+   * or files, plus the shed-reply deliveries that stand in for one. Deliberately narrower than
+   * `surfaceOutboundCount`, which also counts reactions, edits and deletes: those are acks and
+   * amendments, not this persona's contribution to the room. Read on the way out to mark a
+   * spine-routed turn `posted`, which is how the panel driver tells a persona that argued from
+   * one that said nothing (both come back `silent`).
+   */
+  surfacePostedCount: number;
   crossConversationPosts: number;
   staySilentReason: string | undefined;
   turnUserEntrySeq: number | undefined;
@@ -140,6 +149,7 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
     destination: Destination,
     postText: string,
     attachments?: OutgoingAttachment[],
+    opts?: { message?: boolean },
   ): Promise<SurfacePostResult> => {
     try {
       const idempotencyKey = `post:${session.id}:${randomUUID()}`;
@@ -152,6 +162,11 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
         provenance: postProvenance(idempotencyKey),
       });
       spine.surfaceOutboundCount += 1;
+      // Only a message with something IN it counts as having spoken: an empty-bodied enqueue is
+      // the envelope a reaction/edit/delete rides in, and an empty `post` said nothing either.
+      if (opts?.message && (postText.trim().length > 0 || (attachments?.length ?? 0) > 0)) {
+        spine.surfacePostedCount += 1;
+      }
       if (input.runId) deps.turnStream?.markSurfacePosted(input.runId);
       return { ok: true, deliveryId: delivery.id };
     } catch (e) {
@@ -226,7 +241,7 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
         ...(taskList?.length ? { taskList: taskList.map(({ id, title, status }) => ({ id, title, status })) } : {}),
         ...(footer ? { debugFooter: footer } : {}),
       };
-      return enqueue(projectedDestination, postText, f.attachments);
+      return enqueue(projectedDestination, postText, f.attachments, { message: true });
     },
     reach: async (postText, target, files) => {
       if (spine.crossConversationPosts >= 5) return { ok: false, message: "outbound limit reached for this turn" };
@@ -242,7 +257,7 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
       const sending = postText.trim().length > 0 || (f.attachments?.length ?? 0) > 0;
       const d = await resolveDestination(target, { mayOpenGroup: sending });
       if (!d.ok) return { ok: false, message: d.message };
-      const r = await enqueue(d.destination, postText, f.attachments);
+      const r = await enqueue(d.destination, postText, f.attachments, { message: true });
       if (!r.ok) return r;
       spine.crossConversationPosts += 1;
       let label = `a group DM (${target.participants?.length ?? 0} people)`;

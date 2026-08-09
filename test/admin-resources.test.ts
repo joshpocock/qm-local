@@ -524,7 +524,14 @@ test("ambient-policy edits a channel's standing order and bot ledger through the
     const empty = (await (await fetch(`${srv.base}/v1/admin/scopes/channel:C1`, { headers: ADMIN })).json()) as {
       ambientPolicy: { orders: string; bots: object; updatedAt: number };
     };
-    assert.deepEqual(empty.ambientPolicy, { orders: "", bots: {}, ambientEnabled: null, updatedAt: 0 });
+    assert.deepEqual(empty.ambientPolicy, {
+      orders: "",
+      bots: {},
+      ambientEnabled: null,
+      debateRounds: null,
+      defaultDebateRounds: 1,
+      updatedAt: 0,
+    });
 
     const badScope = await fetch(`${srv.base}/v1/admin/scopes/org:default-org/ambient-policy`, {
       method: "PUT",
@@ -584,6 +591,60 @@ test("ambient-policy edits a channel's standing order and bot ledger through the
     });
     assert.equal(fresh.status, 200);
     assert.equal((await srv.built.channelPolicy.get("C1"))?.orders, "updated");
+  } finally {
+    await srv.close();
+  }
+});
+
+test("ambient-policy carries a per-channel debate-rounds override that only narrows the admin default", async () => {
+  const srv = start();
+  const put = (body: unknown, scope = "channel:C1"): Promise<Response> =>
+    fetch(`${srv.base}/v1/admin/scopes/${scope}/ambient-policy`, {
+      method: "PUT",
+      headers: ADMIN,
+      body: JSON.stringify(body),
+    });
+  const read = async (): Promise<{ debateRounds: unknown; defaultDebateRounds: unknown }> => {
+    const { ambientPolicy } = (await (
+      await fetch(`${srv.base}/v1/admin/scopes/channel:C1`, { headers: ADMIN })
+    ).json()) as { ambientPolicy: { debateRounds: unknown; defaultDebateRounds: unknown } };
+    return { debateRounds: ambientPolicy.debateRounds, defaultDebateRounds: ambientPolicy.defaultDebateRounds };
+  };
+  try {
+    // Admin auth is the same gate the rest of the resource uses; nothing about the new field
+    // opens a second door.
+    const anon = await fetch(`${srv.base}/v1/admin/scopes/channel:C1/ambient-policy`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", "x-admin-actor": "nobody@default-org" },
+      body: JSON.stringify({ orders: "", bots: {}, debateRounds: 3 }),
+    });
+    assert.equal(anon.status, 403);
+    assert.equal(await srv.built.channelPolicy.get("C1"), null, "a refused write stores nothing");
+
+    for (const bad of [0, 21, 2.5, -1, "three", true, {}]) {
+      const res = await put({ orders: "", bots: {}, debateRounds: bad });
+      assert.equal(res.status, 400, `debateRounds ${JSON.stringify(bad)} must be refused`);
+      assert.match(((await res.json()) as { message: string }).message, /whole number from 1 to 20/);
+    }
+
+    assert.equal((await put({ orders: "", bots: {}, debateRounds: 4 })).status, 200);
+    assert.equal((await srv.built.channelPolicy.get("C1"))?.debateRounds, 4);
+    assert.deepEqual(await read(), { debateRounds: 4, defaultDebateRounds: 1 });
+    const revs = await srv.built.channelPolicy.history("C1");
+    assert.equal(revs[0]?.debateRounds, 4, "the override is on the audit revision like every other field");
+
+    // Omitting the key is not the same as clearing it: an operator editing only the standing
+    // order must not silently drop this channel's ceiling.
+    assert.equal((await put({ orders: "watch the launch", bots: {} })).status, 200);
+    assert.equal((await srv.built.channelPolicy.get("C1"))?.debateRounds, 4);
+
+    // Explicit null clears it back to the admin default.
+    assert.equal((await put({ orders: "watch the launch", bots: {}, debateRounds: null })).status, 200);
+    assert.equal((await srv.built.channelPolicy.get("C1"))?.debateRounds, undefined);
+    assert.deepEqual(await read(), { debateRounds: null, defaultDebateRounds: 1 });
+
+    // Still a channel-and-group knob only, exactly like the rest of the resource.
+    assert.equal((await put({ orders: "", bots: {}, debateRounds: 2 }, "org:default-org")).status, 400);
   } finally {
     await srv.close();
   }

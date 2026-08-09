@@ -95,7 +95,7 @@ test("surface post rejects traversal before provisioning or staging any attachme
         calls.grant += 1;
       },
     },
-    spine: { surfaceOutboundCount: 0, crossConversationPosts: 0 },
+    spine: { surfaceOutboundCount: 0, surfacePostedCount: 0, crossConversationPosts: 0 },
   } as unknown as SurfaceToolsContext);
   const r = await tools!.post("hello", undefined, ["report.pdf", "../.ssh/id_ed25519"]);
   assert.equal(r.ok, false);

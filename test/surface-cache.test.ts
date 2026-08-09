@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createMemorySurfaceCache, type LiveFallback } from "../src/surface-cache/surface-cache.ts";
-import { createMemoryChannelPolicyStore } from "../src/surface-cache/channel-policy-store.ts";
+import { createMemoryChannelPolicyStore, parseDebateRounds } from "../src/surface-cache/channel-policy-store.ts";
+import { ROOM_MAX_ROUNDS } from "../src/types.ts";
 import {
   judgeAmbientBatch,
   parseAmbientDecision,
@@ -180,6 +181,41 @@ test("channel policy store: ambientEnabled is tri-state — unset by default, ro
     [undefined, false, false, true, undefined].reverse(),
     "every revision records the override, so a flip is auditable",
   );
+});
+
+test("channel policy store: debateRounds is tri-state — unset by default, round-trips, omitted leaves it, null clears it", async () => {
+  const store = createMemoryChannelPolicyStore();
+  await store.set("C1", "watch the launch", { setBy: "U-admin" });
+  assert.equal((await store.get("C1"))?.debateRounds, undefined, "unset by default — the admin default decides");
+  await store.set("C1", "watch the launch", { setBy: "U-admin", debateRounds: 4 });
+  assert.equal((await store.get("C1"))?.debateRounds, 4, "the override persists");
+  await store.set("C1", "watch the launch harder", { setBy: "U-admin" });
+  assert.equal((await store.get("C1"))?.debateRounds, 4, "an omitted arg leaves the override unchanged");
+  await store.set("C1", "watch the launch harder", { setBy: "U-admin", debateRounds: 1 });
+  assert.equal((await store.get("C1"))?.debateRounds, 1, "narrowing to one round persists");
+  await store.set("C1", "watch the launch harder", { setBy: "U-admin", debateRounds: null });
+  assert.equal((await store.get("C1"))?.debateRounds, undefined, "null clears back to the admin default");
+  assert.equal((await store.get("C2"))?.debateRounds, undefined, "other channels are untouched");
+  const h = await store.history("C1");
+  assert.deepEqual(
+    h.map((r) => r.debateRounds),
+    [undefined, 4, 4, 1, undefined].reverse(),
+    "every revision records the ceiling, so a change is auditable",
+  );
+});
+
+test("parseDebateRounds accepts 1..ROOM_MAX_ROUNDS, clears on null/blank, and refuses everything else", () => {
+  assert.deepEqual(parseDebateRounds(1), { debateRounds: 1 });
+  assert.deepEqual(parseDebateRounds(ROOM_MAX_ROUNDS), { debateRounds: ROOM_MAX_ROUNDS });
+  assert.deepEqual(parseDebateRounds("7"), { debateRounds: 7 }, "a form field arrives as a string");
+  for (const clear of [null, undefined, ""]) {
+    assert.deepEqual(parseDebateRounds(clear), { debateRounds: null }, `${JSON.stringify(clear)} clears the override`);
+  }
+  for (const bad of [0, -1, 2.5, ROOM_MAX_ROUNDS + 1, "three", true, {}, [], NaN, Infinity]) {
+    const parsed = parseDebateRounds(bad);
+    assert.ok("error" in parsed, `${JSON.stringify(bad)} must be refused`);
+    assert.match(parsed.error, /whole number from 1 to 20/);
+  }
 });
 
 test("parseAmbientDecision tolerates a JSON object, prose-wrapped JSON, and garbage", () => {

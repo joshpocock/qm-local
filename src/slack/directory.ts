@@ -56,12 +56,17 @@ type RosterKind = { plural: string; authz: string; item: string };
 
 const MEMBERS_PAGE_LIMIT = 200;
 const MAX_CLASSIFY_MEMBERS = 200;
+/** A DM's counterpart changes about as often as a channel's name; re-ask rarely. */
+const DM_COUNTERPART_TTL_MS = 30 * 60_000;
+const DM_COUNTERPART_MAX = 500;
 
 export interface Directory {
   getUserSnapshot(client: any): Promise<{ byId: Map<string, CachedUser>; fetchedAt: number } | undefined>;
   forceDirectorySync(client: any): Promise<void>;
   classifyUserCached(client: any, userId: string): Promise<CachedUser & { ok: boolean }>;
   classifyActor(client: any, userId: string): Promise<ActorAssertion>;
+  /** Display name of the DM member who is not `viewerSlackId` — see the implementation. */
+  dmCounterpartName(client: any, channel: string, viewerSlackId?: string): Promise<string | undefined>;
   getChannelInfo(client: any, channel: string): Promise<ChannelMeta | undefined>;
   channelMembership(
     client: any,
@@ -106,6 +111,8 @@ export function createDirectory(deps: {
   const CHANNEL_MEMBERS_TTL_MS = deps.channelMembersTtlMs ?? 30 * 60_000;
   const MAX_PRIVATE_CHANNELS = deps.maxPrivateChannels ?? 50;
   const userCache = createUserCache(deps.userCacheTtlMs ? { ttlMs: deps.userCacheTtlMs } : {});
+
+  const dmCounterparts = new Map<string, { name?: string; at: number }>();
 
   let userSnapshot: UserSnapshot | undefined;
   let userSnapshotInFlight: Promise<UserSnapshot> | undefined;
@@ -430,6 +437,46 @@ export function createDirectory(deps: {
     return (await classifyUserCached(client, userId)).actor;
   }
 
+  /**
+   * Who a DM is WITH, from the point of view of the person whose sidebar it shows up in.
+   *
+   * A channel names itself — `#qm-agents` is the same string for everyone — but a DM's name is
+   * relative: Slack shows each side the OTHER member. `conversations.info` on an IM answers
+   * with `user`, the member across from the token that asked, so with this bot's token that is
+   * the human. A DM session hangs off that human's personal scope, so echoing their own name
+   * back at them says nothing (and two DMs with two different bots would render identically);
+   * the useful name is the member who is not the viewer, which for a bot's own IM is the bot.
+   * A DM whose counterpart is a person — a shared inbox, a coworker — resolves the same way,
+   * through the same user cache, without a second code path.
+   */
+  async function dmCounterpartName(client: any, channel: string, viewerSlackId?: string): Promise<string | undefined> {
+    const key = `${channel} ${viewerSlackId ?? ""}`;
+    const hit = dmCounterparts.get(key);
+    if (hit && Date.now() - hit.at < DM_COUNTERPART_TTL_MS) return hit.name;
+    const info = await getChannelInfo(client, channel);
+    const other = typeof info?.user === "string" && info.user ? info.user : undefined;
+    const counterpartId = other && other !== viewerSlackId && other !== ids.botUserId ? other : ids.botUserId;
+    let name: string | undefined;
+    if (counterpartId) {
+      const resolved = await classifyUserCached(client, counterpartId).catch(
+        swallowAs("slack: DM counterpart lookup", undefined),
+      );
+      name = resolved?.actor.displayName?.trim() || undefined;
+    }
+    if (!name && counterpartId === ids.botUserId) name = ids.botHandle.trim() || undefined;
+    dmCounterparts.set(key, { ...(name ? { name } : {}), at: Date.now() });
+    capDmCounterparts();
+    return name;
+  }
+
+  function capDmCounterparts(): void {
+    if (dmCounterparts.size <= DM_COUNTERPART_MAX) return;
+    for (const k of dmCounterparts.keys()) {
+      dmCounterparts.delete(k);
+      if (dmCounterparts.size <= DM_COUNTERPART_MAX) break;
+    }
+  }
+
   async function getChannelInfo(client: any, channel: string): Promise<ChannelMeta | undefined> {
     try {
       return (await client.conversations.info({ channel })).channel as ChannelMeta;
@@ -493,6 +540,7 @@ export function createDirectory(deps: {
     forceDirectorySync,
     classifyUserCached,
     classifyActor,
+    dmCounterpartName,
     getChannelInfo,
     channelMembership,
     allInternalRosters,

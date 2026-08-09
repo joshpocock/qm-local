@@ -206,14 +206,29 @@ export function defaultSessionTitle(s: CoreSession): string {
   if (surface === "web") return "Web chat";
   if (s.type === "channel") return channelLabel(s) ?? "Channel";
   if (s.type === "group") return groupDmText(s.channelName) ?? s.channelName?.trim() ?? "Group DM";
-  return "Direct message";
+  return slackDmCounterpart(s) ?? "Direct message";
 }
 
 function channelLabel(s: CoreSession): string | null {
   return s.channelName && s.channelName.trim() ? `#${s.channelName.replace(/^#/, "")}` : null;
 }
 
+/**
+ * Who a Slack DM is with. A DM row is the one Slack row whose name is a person: the surface
+ * records the counterpart in `channelName` (the field a channel's `#name` already travels in),
+ * and it beats a generated title because "Set up Slack keychain, pick voice" is what was said,
+ * not who said it — Slack's own sidebar names this row after the other side and so does this.
+ * No `#`: it is not a room.
+ */
+function slackDmCounterpart(s: CoreSession): string | null {
+  if (s.type !== "dm" || surfaceOf(s) !== "slack") return null;
+  const name = s.channelName?.trim().replace(/^[#@]/, "").trim();
+  return name ? name : null;
+}
+
 export function groupDmTitle(s: CoreSession): TemplateResult | string {
+  const counterpart = slackDmCounterpart(s);
+  if (counterpart) return counterpart;
   if (s.title && s.title.trim()) return s.title;
   if (projectName(s.scopeId)) return defaultSessionTitle(s);
   if (s.type !== "group") return defaultSessionTitle(s);
@@ -226,6 +241,8 @@ export function groupDmTitle(s: CoreSession): TemplateResult | string {
 }
 
 export function sessionTitle(s: CoreSession): string {
+  const counterpart = slackDmCounterpart(s);
+  if (counterpart) return counterpart;
   return s.title && s.title.trim() ? s.title : defaultSessionTitle(s);
 }
 
@@ -958,7 +975,11 @@ function privateMark(s: CoreSession): TemplateResult | typeof nothing {
 
 function rowContext(s: CoreSession): string | null {
   let label = sharedContextLabel(s.scopeId, s.channelName ?? null);
-  if (surfaceOf(s) === "slack") label = s.type === "group" ? groupDmText(s.channelName) : channelLabel(s);
+  if (surfaceOf(s) === "slack") {
+    // A DM's `channelName` is the counterpart already shown as the title — never a `#room`.
+    if (s.type === "dm") label = null;
+    else label = s.type === "group" ? groupDmText(s.channelName) : channelLabel(s);
+  }
   return label && label !== sessionTitle(s) ? label : null;
 }
 

@@ -4,6 +4,7 @@ import {
   createDeduper,
   dedupeKey,
   isGroupMembershipMessage,
+  isSelfOrSiblingAuthored,
   isThreadReply,
   mentionsBot,
   onBotJoinedChannel,
@@ -37,6 +38,14 @@ export function registerSlackEvents(
 
   app.event("app_mention", async ({ event, body, client, context }: any) => {
     const e = event as any;
+    // A mention written by this bot or by a sibling qm bot is an ECHO of something this process
+    // just posted, not somebody addressing it. `app.message` has always dropped those; this path
+    // had not, and a panel reply naming the next persona (`<@U…>` pills are how the debate reads)
+    // fans an `app_mention` out to that sibling, which dispatched an addressed turn on the
+    // panel's own threadRef and got folded into the in-flight persona run as a mid-turn steer —
+    // stalling the debate for a whole turn wall clock. Humans and third-party bots are untouched,
+    // so a real reply mid-debate still steers exactly as before.
+    if (isSelfOrSiblingAuthored(e, ids.botUserId, ids.ownBotId)) return;
     const key = dedupeKey({
       event_id: (body as any)?.event_id,
       client_msg_id: e.client_msg_id,
