@@ -56,8 +56,14 @@ function httpModeRefusal(ctx: ApiCtx): string | null {
  * request-borne roster against the SLACK USER's visible personas. A persona homed in someone's
  * personal scope will therefore be refused for everybody else — home shared bot personas in an
  * org, team or channel scope (docs/slack-multi-bot.md).
+ *
+ * Exported so the singular installation route validates its PANEL persona by exactly these
+ * rules rather than a second copy of them.
  */
-async function resolvePersonaId(ctx: ApiCtx, raw: unknown): Promise<{ personaId: string | null } | { error: string }> {
+export async function resolvePersonaId(
+  ctx: ApiCtx,
+  raw: unknown,
+): Promise<{ personaId: string | null } | { error: string }> {
   if (raw === null || raw === undefined || raw === "") return { personaId: null };
   if (typeof raw !== "string") return { error: "personaId must be an agent id or null" };
   const persona = await ctx.app.getPersona(raw);
@@ -228,6 +234,11 @@ export async function updateSlackBot(ctx: ApiCtx): Promise<void> {
       patch.appToken = appToken;
       if (workspace.teamId) patch.teamId = workspace.teamId;
       if (workspace.teamName) patch.teamName = workspace.teamName;
+      // A rotation can point the record at a different Slack app, so the identity `auth.test`
+      // just reported replaces whatever handle was stored — and backfills it on a record
+      // written before the handle was captured at all.
+      if (workspace.botHandle) patch.botHandle = workspace.botHandle;
+      if (workspace.botUserId) patch.botUserId = workspace.botUserId;
     } catch (error) {
       return sendJson(ctx.res, 400, { error: "invalid_slack_installation", message: errMessage(error) });
     }

@@ -1,4 +1,5 @@
 import { performance } from "node:perf_hooks";
+import { requestedPanelRounds } from "../agents/panel-driver.ts";
 import { errMessage, swallowAs } from "../util/errors.ts";
 import {
   type ActorAssertion,
@@ -31,6 +32,8 @@ import {
   isMpim,
   type SurfaceHeaderClient,
   maybeInterceptStop,
+  mentionsBot,
+  mentionsSiblingBot,
   postThenAckRunDelivery,
   postWithVerify,
   processInboundFiles,
@@ -62,6 +65,14 @@ import {
   conversationPlaceLabel,
   slackSurfaceInstructions,
 } from "./messaging.ts";
+import {
+  claimSlackPanel,
+  mentionedPersonaBots,
+  personaBotForId,
+  registeredPersonaBots,
+  type SlackBotIdentity,
+} from "./message-gating.ts";
+import { translateInboundMentions, translateOutboundMentions } from "./panel-mentions.ts";
 
 interface Incoming {
   kind: "dm" | "channel";
@@ -141,6 +152,12 @@ export function createTurnHandler(deps: {
    * and when the session already has a room of its own.
    */
   personaId?: string;
+  /**
+   * Rounds for a room panel triggered from Slack — a human message that `@mentions` two or more
+   * persona-bound bots. Everything about the panel itself (turn order, bonus turns for being
+   * `@mentioned`, PASS, the ceiling) is core's job; this is the only knob the surface sets.
+   */
+  panelRounds: number;
 }): TurnHandler {
   const {
     bridge,
@@ -196,8 +213,42 @@ export function createTurnHandler(deps: {
       : await classifyUserCached(client, inc.userId);
     const actor = classified.actor;
     const timezone = classified.timezone;
-    const text = stripMention(inc.rawText, ids.botUserId);
+    // A human message naming TWO OR MORE persona bots is a room panel, not two separate turns.
+    // Every one of those bots receives the message, so exactly one of them must dispatch it and
+    // the rest must stand down — their mention is answered by the panel. Mentions of humans, of
+    // third-party bots and of the persona-less default qm bot count for nothing here, which is
+    // what keeps the default bot out of every roster (it can still be the instance that
+    // dispatches; it simply never speaks).
+    // Channels and group DMs only: a 1:1 DM belongs to one bot, and the other personas are not
+    // in it, so their replies would have nowhere to land.
+    const panelBots =
+      inc.kind === "channel" && !inc.unprompted && !inc.synthetic && !inc.botAuthored && !actor.isBot
+        ? mentionedPersonaBots(inc.rawText)
+        : [];
+    const panel = panelBots.length >= 2 ? panelBots : undefined;
+    // An UNPROMPTED turn is this bot volunteering: nobody asked it. A message that names a
+    // sibling qm bot and not this one already has an answerer — that bot got the same event —
+    // so volunteering on top of it is how a question put to one agent by name got answered by
+    // the org's neutral bot instead. An explicit mention of THIS bot is not unprompted and
+    // never reaches here; a message naming nobody is still true ambient and still runs.
+    // Reaction turns are their own trigger, not the message's, so they are left alone.
+    if (
+      inc.unprompted &&
+      !inc.synthetic &&
+      !mentionsBot(inc.rawText, ids.botUserId) &&
+      mentionsSiblingBot(inc.rawText, ids.botUserId)
+    ) {
+      return;
+    }
+    // `<@U…>` → `@Name` BEFORE the self-mention strip, so a persona-bound self is addressed by
+    // name instead of being erased: `panelAddressed` reads `@Name`, and the tag order in the
+    // text is the order the room speaks in. A persona-less self (the default bot) still has its
+    // raw mention stripped exactly as before.
+    const text = panel
+      ? stripMention(translateInboundMentions(inc.rawText), ids.botUserId)
+      : stripMention(inc.rawText, ids.botUserId);
     if (!hasContent(text, inc.files)) return;
+    if (panel && !claimSlackPanel(inc.channel, inc.ts)) return;
 
     let audience: ActorAssertion[] = [actor];
     let channelRef: string | undefined;
@@ -211,11 +262,16 @@ export function createTurnHandler(deps: {
     let slackIdsByPrincipal: Map<string, string> | undefined;
     let conversationKind: SlackConversationKind = inc.kind;
     let allowedTs: Set<string> = new Set();
-    const postReply = async (msg: string, blocks?: Array<Record<string, unknown>>): Promise<string | undefined> => {
-      const posted = await client.chat.postMessage({
+    const postReply = async (
+      msg: string,
+      blocks?: Array<Record<string, unknown>>,
+      /** Posts as another persona's bot; defaults to this instance's own client. */
+      via?: { chat: { postMessage(args: Record<string, unknown>): Promise<unknown> } },
+    ): Promise<string | undefined> => {
+      const posted = (await (via ?? client).chat.postMessage({
         ...slackReplyArgs(inc.channel, msg, replyThreadTs, { threadOnly: inc.kind === "channel", unfurlLinks: false }),
         ...(blocks ? { blocks } : {}),
-      });
+      })) as { ts?: string };
       const ts = posted.ts as string | undefined;
       mirrorSelfPost(inc.channel, ts, msg, { sub: replyThreadTs });
       return ts;
@@ -265,25 +321,31 @@ export function createTurnHandler(deps: {
 
     let queuedRunId: string | undefined;
     let taskList: TaskListPresenter | undefined;
-    const ack = inc.unprompted
-      ? undefined
-      : createAckPresenter({
-          postAck: async (text) => {
-            const rendered = toSlackMrkdwn(text);
-            if (await taskList?.addLead(rendered)) return;
-            const ts = await postReply(rendered);
-            if (ts) await taskList?.attach(ts, rendered);
-          },
-          addReaction: (name) => client.reactions.add({ channel: inc.channel, timestamp: inc.ts, name }).then(() => {}),
-          removeReaction: (name) =>
-            client.reactions.remove({ channel: inc.channel, timestamp: inc.ts, name }).then(() => {}),
-          emojiCandidates: [...DEFAULT_ACK_REACTIONS],
-          emojiPick: ackEmoji.requestAckEmoji(text, ackEmoji.ackPickCandidates(client), {
-            channel: inc.channel,
-            ts: inc.ts,
-          }),
-        });
-    if (!inc.unprompted) {
+    // Every message a panel produces has to come from the persona that wrote it. An ack or a
+    // task-list placeholder is posted (and later edited in place) by whichever instance claimed
+    // the message, and an edit cannot change identity afterwards — so a panel runs without
+    // them rather than putting a third voice in the thread. Single-mention turns are untouched.
+    const ack =
+      inc.unprompted || panel
+        ? undefined
+        : createAckPresenter({
+            postAck: async (text) => {
+              const rendered = toSlackMrkdwn(text);
+              if (await taskList?.addLead(rendered)) return;
+              const ts = await postReply(rendered);
+              if (ts) await taskList?.attach(ts, rendered);
+            },
+            addReaction: (name) =>
+              client.reactions.add({ channel: inc.channel, timestamp: inc.ts, name }).then(() => {}),
+            removeReaction: (name) =>
+              client.reactions.remove({ channel: inc.channel, timestamp: inc.ts, name }).then(() => {}),
+            emojiCandidates: [...DEFAULT_ACK_REACTIONS],
+            emojiPick: ackEmoji.requestAckEmoji(text, ackEmoji.ackPickCandidates(client), {
+              channel: inc.channel,
+              ts: inc.ts,
+            }),
+          });
+    if (!inc.unprompted && !panel) {
       taskList = createTaskListPresenter({
         post: (text, blocks) => postReply(text, blocks),
         update: (ts, text, blocks) =>
@@ -448,7 +510,23 @@ export function createTurnHandler(deps: {
       ...(timezone ? { timezone } : {}),
       // A persona-bound bot answers as that persona: one member, one round. Core validates the
       // roster (visible, enabled, not archived) and refuses the turn with a reason if it fails.
-      ...(deps.personaId ? { room: { personaIds: [deps.personaId], rounds: 1 } } : {}),
+      //
+      // Two or more persona bots addressed at once is a ROOM: one turn carrying the whole
+      // roster in mention order. Turn-taking, bonus turns, PASS and the ceiling are all
+      // `runRoomPanel`'s job from here — the surface does not run a loop of its own.
+      ...(panel
+        ? {
+            room: {
+              personaIds: panel.map((bot) => bot.personaId!),
+              // The admin's "Debate rounds" is a CEILING, not a quota. A count stated in the
+              // message itself ("go back and forth 4 times") wins below it; nothing stated
+              // means the ceiling, and the PASS rule still ends a debate early either way.
+              rounds: Math.min(requestedPanelRounds(inc.rawText) ?? deps.panelRounds, deps.panelRounds),
+            },
+          }
+        : deps.personaId
+          ? { room: { personaIds: [deps.personaId], rounds: 1 } }
+          : {}),
     };
     const tSubmit = performance.now();
     let result: TurnResult;
@@ -520,6 +598,13 @@ export function createTurnHandler(deps: {
 
     if (result.status === "ok") {
       if (inc.kind === "channel" && replyThreadTs) threads.mark(inc.channel, replyThreadTs, true);
+      // The first persona of a panel replies through THIS call; the rest come back through the
+      // delivery queue (see docs/slack-multi-bot.md). Either way the reply is posted by the bot
+      // whose persona actually wrote it — core says who that was on the result, so an `@tag`
+      // join that reorders the room cannot make us guess wrong. A persona whose instance has
+      // stopped falls back to this client rather than losing its reply.
+      const author: SlackBotIdentity | undefined = panel ? personaBotForId(result.panelPersona?.id) : undefined;
+      const postAs = author?.postClient;
       const { text: replyBody, reactions, agentRequests } = cleanAgentReplyForSlack(result.reply ?? "");
       const actionableAgentRequests = inc.kind === "channel" ? agentRequests : [];
       const hasNonText = !!(
@@ -529,7 +614,13 @@ export function createTurnHandler(deps: {
         result.pendingApprovals?.length
       );
       let reply = "(no response)";
-      if (replyBody) reply = toSlackMrkdwn(replyBody);
+      // `@Critic` becomes a real mention pill when Critic is a persona bot running here — that
+      // is what makes the room read as a conversation instead of a wall of text. Done before
+      // `toSlackMrkdwn`, which treats `<@U…>` as a literal and passes it through untouched.
+      if (replyBody)
+        reply = toSlackMrkdwn(
+          panel ? translateOutboundMentions(replyBody, registeredPersonaBots(), result.panelPersona?.name) : replyBody,
+        );
       else if (hasNonText) reply = "";
       const postText = reply;
       const tDeliverStart = performance.now();
@@ -551,12 +642,12 @@ export function createTurnHandler(deps: {
         }
         await settleAck();
         if (postText) finalizedTaskList = (await taskList?.finalize(postText)) ?? false;
-        if (postText && !finalizedTaskList) await postReply(postText);
+        if (postText && !finalizedTaskList) await postReply(postText, undefined, postAs);
         if (uploadError) await postReply(uploadFailureNote(uploadError));
       } else {
         await settleAck();
         if (postText) finalizedTaskList = (await taskList?.finalize(postText)) ?? false;
-        if (postText && !finalizedTaskList) await postReply(postText);
+        if (postText && !finalizedTaskList) await postReply(postText, undefined, postAs);
       }
       if (queuedRunId) {
         reportTurnMetrics(queuedRunId, {

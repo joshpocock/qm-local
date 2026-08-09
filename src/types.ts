@@ -543,4 +543,11 @@ export interface TurnResult {
   attachments?: OutgoingAttachment[];
   sourceUserSeq?: number;
   sourceAssistantEntrySeq?: number;
+  /**
+   * The agent persona that AUTHORED this reply, when the turn was one persona speaking in a
+   * room. Never persisted on the run — it is read off the run's own `panel` block on the way
+   * out, so a surface that gives each persona its own identity (Slack's per-persona bots) can
+   * post the reply as its author rather than as the surface's default identity.
+   */
+  panelPersona?: { id: string; name: string };
 }

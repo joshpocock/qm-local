@@ -1,6 +1,6 @@
 import { html, nothing, type TemplateResult } from "lit";
 import { live } from "lit/directives/live.js";
-import { ArrowLeft, Plus, RefreshCw, Search } from "lucide";
+import { ArrowLeft, Plus, RefreshCw, Search, type IconNode } from "lucide";
 import { icon } from "./ui";
 import { scopeFilterControl } from "./contexts";
 
@@ -8,6 +8,16 @@ export function listBackLink(label: string, onBack: () => void): TemplateResult 
   return html`<button class="context-back" type="button" @click=${onBack}>
     ${icon(ArrowLeft, 15)}<span>${label}</span>
   </button>`;
+}
+
+/**
+ * A small uppercase heading for splitting a `listPageTpl` row list into named groups (e.g.
+ * Rooms ahead of Chats). Pass it as an item inside `rows` — the caller is responsible for
+ * only including it when that group is non-empty, so an empty group never leaves a bare
+ * heading behind.
+ */
+export function listSectionHead(label: string, glyph: IconNode): TemplateResult {
+  return html`<div class="list-section-head">${icon(glyph, 13)}<span>${label}</span></div>`;
 }
 
 export interface ListPageOpts {

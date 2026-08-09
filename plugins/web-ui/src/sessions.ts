@@ -14,6 +14,7 @@ import {
   Hash,
   Link,
   Lock,
+  MessageSquare,
   Pencil,
   Pin,
   PinOff,
@@ -48,6 +49,8 @@ import {
   chatBrowseStatusMatches,
   bumpActivity,
   groupProjectSessions,
+  groupSlackChannels,
+  isPrivateSlackChannel,
   isPrivateSlackRow,
   isRoomSession,
   recencyGroup,
@@ -55,6 +58,7 @@ import {
   reconcileSessions,
   rowIndicators,
   splitPinned,
+  slackChannelIdOf,
   splitRooms,
   splitSlack,
   surfaceOf,
@@ -62,6 +66,7 @@ import {
   withoutUnsentPending,
   type RecentItem,
   type ChatBrowseStatus,
+  type SlackListItem,
 } from "./session-list";
 
 // Re-exported so existing callers (chat.ts, contexts.ts) keep importing it from "./sessions";
@@ -71,7 +76,7 @@ export { surfaceOf };
 import { hideTooltip, showTooltip } from "./tooltip";
 import { errMessage } from "../../chassis/src/errors";
 import { copyText, fieldSelect, icon, relTime } from "./ui";
-import { listPageTpl } from "./list-page";
+import { listPageTpl, listSectionHead } from "./list-page";
 import {
   contextsState,
   ensureContexts,
@@ -82,7 +87,7 @@ import {
 } from "./contexts";
 import { groupDmLabel, groupDmText } from "./group-dm-label";
 import { transcriptModel } from "./model-options";
-import { appState, closeSidebarOnNarrowView, renderSidebarTop, showMainEmpty, startNewRoom } from "./shell";
+import { appState, closeSidebarOnNarrowView, renderSidebarTop, showMainEmpty, startNewRoom, switchView } from "./shell";
 import { allConversations, mainConversation } from "./conversations";
 import type { Conversation } from "./conv-types";
 import {
@@ -102,18 +107,10 @@ export const sessionsState = {
   openMenuId: null as string | null,
   renamingId: null as string | null,
   openingKey: null as string | null,
-  webOnly: true,
   collapsedProjectScopes: new Set<string>(),
+  // Same in-memory, default-expanded collapse store as projects, keyed by Slack channel id.
+  collapsedSlackChannels: new Set<string>(),
 };
-
-const WEB_ONLY_KEY = "web-ui:web-only";
-sessionsState.webOnly = ((): boolean => {
-  try {
-    return localStorage.getItem(WEB_ONLY_KEY) !== "0";
-  } catch {
-    return true;
-  }
-})();
 
 let sessionsLoading = false;
 let sessionsNotice = "";
@@ -137,6 +134,7 @@ export function resetSessionsState(): void {
   sessionsState.renamingId = null;
   sessionsState.openingKey = null;
   sessionsState.collapsedProjectScopes.clear();
+  sessionsState.collapsedSlackChannels.clear();
   renameDraft = "";
   refreshingTitleIds.clear();
   showArchived = false;
@@ -167,9 +165,9 @@ function recentItemsFor(sessions: readonly CoreSession[]): RecentItem[] {
 
 function loadRecentContexts(force = false): void {
   const fresh = contextsState.loaded && Date.now() - contextsState.loadedAt < RECENT_CONTEXT_MAX_AGE_MS;
-  if (appState.currentView !== "chats" || recentContextsRequest || (!force && fresh)) return;
+  if (recentContextsRequest || (!force && fresh)) return;
   const request = ensureContexts(force || !fresh).then(() => {
-    if (appState.currentView === "chats") renderList();
+    renderList();
   });
   recentContextsRequest = request;
   void request.finally(() => {
@@ -256,16 +254,18 @@ export function slackLogo(size = 13): TemplateResult {
   </svg>`;
 }
 
+/**
+ * Every session the viewer has, newest first. There is deliberately no surface filter: web
+ * and Slack conversations each have their own home in the list, and the machine-made ones
+ * (cron fires, credential drops) carry no participant so they never reach a sidebar in the
+ * first place. Cron runs belong to the Crons page, which shows them per-cron.
+ */
 function visibleSessions(): CoreSession[] {
-  const sorted = [...sessionsState.list].sort((a, b) => activityOf(b) - activityOf(a));
-  if (!sessionsState.webOnly) return sorted;
-  // Slack has its own group in the sidebar now, so "Web only" no longer hides it — the
-  // toggle's job is narrowed to hiding the core/misc surface only.
-  return sorted.filter((s) => surfaceOf(s) === "web" || surfaceOf(s) === "slack");
+  return [...sessionsState.list].sort((a, b) => activityOf(b) - activityOf(a));
 }
 
 export function renderList(): void {
-  if (!appState.listEl || appState.currentView !== "chats") return;
+  if (!appState.listEl) return;
   const visible = visibleSessions();
   const active = visible.filter((s) => !s.archived);
   const archived = visible.filter((s) => s.archived);
@@ -321,9 +321,9 @@ export function renderList(): void {
           ? html`
               <div class="recents-group slack-head">${slackLogo(11)}<span>Slack</span></div>
               ${repeat(
-                slack,
-                (session) => session.threadRef,
-                (session) => sessionRow(session),
+                groupSlackChannels(slack),
+                (item) => (item.kind === "channel" ? `slack-channel:${item.channelId}` : item.session.threadRef),
+                (item) => (item.kind === "channel" ? slackChannelGroup(item) : sessionRow(item.session)),
               )}
             `
           : nothing
@@ -420,11 +420,95 @@ function recentItem(item: RecentItem): TemplateResult {
         ${repeat(
           item.sessions,
           (session) => session.threadRef,
-          (session) => sessionRow(session, true),
+          (session) => sessionRow(session, "project"),
         )}
       </div>
     </section>
   `;
+}
+
+/**
+ * A Slack channel heading with its threads nested underneath.
+ *
+ * The channel is the room; the threads inside it are where the context lives — so the
+ * sidebar mirrors Slack's own shape instead of flattening five threads of one channel into
+ * five near-identical rows. Deliberately reuses the project group's markup, and therefore
+ * its indent rail, collapse chevron and count chip: this is the same "heading with children"
+ * affordance, and giving it a second look would be a lie about how it behaves. It differs in
+ * two ways only — a Slack glyph in place of the folder, and no way to start a conversation,
+ * because a thread is started in Slack.
+ */
+/** The `#name` (or bare channel id, if nothing has resolved a name yet) a channel heading shows — the one piece of `SlackListItem` shape both the sidebar and the Chats page's Slack section read the same way. */
+function slackChannelName(item: Extract<SlackListItem, { kind: "channel" }>): string {
+  return item.name ? `#${item.name}` : item.channelId;
+}
+
+/**
+ * The lock chip on a private Slack channel heading. Visually identical to `privateMark`'s
+ * row-level chip, but kept separate from it: `privateMark` is keyed off `isPrivateSlackRow`
+ * (a DM/group participant fact carried on the session itself), while a channel's privacy
+ * comes from the `/api/contexts` join (`isPrivateSlackChannel`) instead — a channel session's
+ * `type` is always `"channel"`, so `isPrivateSlackRow` would never fire for one anyway. Shared
+ * by both the sidebar's `slackChannelGroup` and the Chats page's channel heading, so "what
+ * makes a channel heading say private" lives in exactly one place.
+ */
+function channelPrivateMark(channelId: string): TemplateResult | typeof nothing {
+  if (!isPrivateSlackChannel(channelId, contextsState.list)) return nothing;
+  return html`<span class="private-chip" title="Private channel">${icon(Lock, 10)}<span>Private</span></span>`;
+}
+
+function slackChannelGroup(item: Extract<SlackListItem, { kind: "channel" }>): TemplateResult {
+  const collapsed = sessionsState.collapsedSlackChannels.has(item.channelId);
+  const name = slackChannelName(item);
+  const childrenId = `slack-channel-${item.channelId.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+  return html`
+    <section
+      class="recent-project slack-channel ${item.sessions.some(isActiveRow) ? "active" : ""}"
+      aria-label=${`${name} channel`}
+    >
+      <div class="recent-project-head">
+        <button
+          class="recent-project-toggle"
+          type="button"
+          aria-expanded=${collapsed ? "false" : "true"}
+          aria-controls=${childrenId}
+          @click=${() => toggleSlackChannel(item.channelId)}
+        >
+          ${icon(collapsed ? ChevronRight : ChevronDown, 13)} ${slackLogo(12)}
+          <span class="recent-project-name">${name}</span>
+          ${channelPrivateMark(item.channelId)}
+        </button>
+        <span class="recent-project-count">${item.sessions.length}</span>
+      </div>
+      <div class="recent-project-children" id=${childrenId} ?hidden=${collapsed}>
+        ${repeat(
+          item.sessions,
+          (session) => session.threadRef,
+          (session) => sessionRow(session, "channel"),
+        )}
+      </div>
+    </section>
+  `;
+}
+
+function toggleSlackChannel(channelId: string): void {
+  if (sessionsState.collapsedSlackChannels.has(channelId)) sessionsState.collapsedSlackChannels.delete(channelId);
+  else sessionsState.collapsedSlackChannels.add(channelId);
+  renderList();
+}
+
+/**
+ * The Chats page's own collapse toggle. It shares `collapsedSlackChannels` with the sidebar —
+ * so a channel collapsed on one surface starts collapsed on the other the next time it draws
+ * — but repaints only the Chats page, exactly as the sidebar's `toggleSlackChannel` repaints
+ * only the sidebar. Neither surface needs to reach across and repaint the other: whichever one
+ * the person is looking at repaints itself, and the shared store keeps them agreeing once both
+ * have had a turn to draw.
+ */
+function toggleChatsPageSlackChannel(channelId: string): void {
+  if (sessionsState.collapsedSlackChannels.has(channelId)) sessionsState.collapsedSlackChannels.delete(channelId);
+  else sessionsState.collapsedSlackChannels.add(channelId);
+  drawChatsPage();
 }
 
 function toggleRecentProject(scopeId: string): void {
@@ -510,13 +594,31 @@ export function drawChatsPage(): void {
     appState.mainEl.replaceChildren(chatsPageHost);
   }
   const q = chatsPageQuery.trim().toLowerCase();
-  const rows = [...sessionsState.list]
+  const filtered = [...sessionsState.list]
     .filter((s) => chatBrowseStatusMatches(s, chatsPageStatus))
     .filter((s) => chatsPageSurface === "all" || surfaceOf(s) === chatsPageSurface)
     .filter((s) => (chatsPageScope ? s.scopeId === chatsPageScope : true))
     .filter((s) => !q || chatMatches(s, q))
-    .sort((a, b) => activityOf(b) - activityOf(a))
-    .map((s) => chatPageRow(s));
+    .sort((a, b) => activityOf(b) - activityOf(a));
+  // Rooms and Slack each get their own section ahead of ordinary chats, same as the sidebar —
+  // split after every filter above so status/surface/scope/search apply to every section
+  // alike, and skip a section's heading entirely when the filters leave it empty. A filtered
+  // channel with no matching threads simply never reaches `groupSlackChannels`, so it renders
+  // nothing rather than an empty heading.
+  const { rooms, rest: afterRooms } = splitRooms(filtered);
+  const { slack, rest: chats } = splitSlack(afterRooms);
+  const rows = [
+    ...(rooms.length ? [listSectionHead("Rooms", Users), ...rooms.map((s) => chatPageRow(s))] : []),
+    ...(slack.length
+      ? [
+          slackSectionHead(),
+          ...groupSlackChannels(slack).map((item) =>
+            item.kind === "channel" ? chatsPageSlackChannel(item) : chatPageRow(item.session),
+          ),
+        ]
+      : []),
+    ...(chats.length ? [listSectionHead("Chats", MessageSquare), ...chats.map((s) => chatPageRow(s))] : []),
+  ];
   let empty = "No conversations yet — start a new chat.";
   if (sessionsLoading && sessionsState.list.length === 0) empty = "Loading conversations…";
   else if (chatsPageScope || q || chatsPageStatus !== "active" || chatsPageSurface !== "all") {
@@ -594,6 +696,44 @@ function chatMatches(s: CoreSession, q: string): boolean {
   return [sessionTitle(s), s.channelName ?? "", context].join(" ").toLowerCase().includes(q);
 }
 
+/** The Chats page's "Slack" section heading — same glyph and label as the sidebar's, laid out as a `list-section-head` so the two "Rooms"/"Chats" headings either side of it read as one family. */
+function slackSectionHead(): TemplateResult {
+  return html`<div class="list-section-head">${slackLogo(13)}<span>Slack</span></div>`;
+}
+
+/**
+ * A channel heading for the Chats page's Slack section: the channel is the room, its threads
+ * are nested underneath, exactly the shape `slackChannelGroup` draws in the sidebar — same
+ * `groupSlackChannels` data, same name fallback, same private-channel chip, same
+ * `collapsedSlackChannels` store (so expanding a channel here expands it in the sidebar too).
+ * It differs only in layout: the Chats page's wider `list-row` idiom instead of the sidebar's
+ * narrow rail, because the two panes have different CSS to begin with.
+ */
+function chatsPageSlackChannel(item: Extract<SlackListItem, { kind: "channel" }>): TemplateResult {
+  const collapsed = sessionsState.collapsedSlackChannels.has(item.channelId);
+  const name = slackChannelName(item);
+  const childrenId = `chats-slack-channel-${item.channelId.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+  return html`
+    <div class="chat-slack-channel">
+      <button
+        class="chat-slack-channel-head"
+        type="button"
+        aria-expanded=${collapsed ? "false" : "true"}
+        aria-controls=${childrenId}
+        @click=${() => toggleChatsPageSlackChannel(item.channelId)}
+      >
+        ${icon(collapsed ? ChevronRight : ChevronDown, 13)} ${slackLogo(13)}
+        <span class="chat-slack-channel-name">${name}</span>
+        ${channelPrivateMark(item.channelId)}
+        <span class="chat-slack-channel-count">${item.sessions.length}</span>
+      </button>
+      <div class="chat-slack-channel-children" id=${childrenId} ?hidden=${collapsed}>
+        ${item.sessions.map((s) => chatPageRow(s))}
+      </div>
+    </div>
+  `;
+}
+
 export const syncWorkingPulse = (el?: Element): void => {
   if (!(el instanceof HTMLElement)) return;
   const pin = (): void => {
@@ -659,7 +799,13 @@ function isActiveRow(s: CoreSession): boolean {
   if (splitState.active) return Boolean(s.id) && sessionInCanvas(s.id);
   if (sessionsState.openingKey) return Boolean(s.id) && s.id === sessionsState.openingKey;
   const main = mainConversation().state;
-  return Boolean((main.sessionId && s.id === main.sessionId) || (main.threadRef && s.threadRef === main.threadRef));
+  // Leaving the Chats view tears the mounted conversation down (sessionId/threadRef go
+  // null) so the transcript pane doesn't linger on another view, but `remembered*` survives
+  // that teardown — fall back to it so the now-persistent sidebar keeps highlighting "your"
+  // chat while it's visible alongside Files, Crons, etc.
+  const sessionId = main.sessionId ?? main.rememberedSessionId;
+  const threadRef = main.threadRef ?? main.rememberedThreadRef;
+  return Boolean((sessionId && s.id === sessionId) || (threadRef && s.threadRef === threadRef));
 }
 
 function chatPageRow(s: CoreSession): TemplateResult {
@@ -816,19 +962,29 @@ function rowContext(s: CoreSession): string | null {
   return label && label !== sessionTitle(s) ? label : null;
 }
 
-function sessionRow(s: CoreSession, projectChild = false): TemplateResult {
+/**
+ * How a row sits in the list. `"project"` and `"channel"` are both nested — same indent
+ * rail, same suppressed context label, because the heading above already says it — but only
+ * a project child renames itself: an untitled web chat under a project reads better as "New
+ * chat" than as the project's own name, whereas a Slack thread's title is derived from its
+ * root message and is the whole point of the row.
+ */
+type RowNesting = "flat" | "project" | "channel";
+
+function sessionRow(s: CoreSession, nesting: RowNesting = "flat"): TemplateResult {
   const saved = Boolean(s.id);
   if (saved && sessionsState.renamingId === s.id) return renameRow(s);
   const active = isActiveRow(s);
   const menuOpen = saved && sessionsState.openMenuId === s.id;
   const refreshingTitle = saved && refreshingTitleIds.has(s.id);
-  const untitledProjectChild = projectChild && !s.title?.trim();
+  const nested = nesting !== "flat";
+  const untitledProjectChild = nesting === "project" && !s.title?.trim();
   let title = sessionTitle(s);
   if (untitledProjectChild) title = surfaceOf(s) === "web" ? "Web chat" : "New chat";
   const readOnly = !isContinuable(s, appState.me?.user ?? "");
   const surface = surfaceOf(s);
   const room = isRoomSession(s);
-  const context = projectChild ? null : rowContext(s);
+  const context = nested ? null : rowContext(s);
   const working = sessionWorking(s);
   let titleContent: string | TemplateResult = groupDmTitle(s);
   if (refreshingTitle) {
@@ -852,7 +1008,7 @@ function sessionRow(s: CoreSession, projectChild = false): TemplateResult {
     .join(", ");
   return html`
     <div
-      class="session-row ${active ? "active" : ""} ${menuOpen ? "menu-open" : ""} ${readOnly ? "read-only" : ""} ${refreshingTitle ? "title-refreshing" : ""} ${working ? "working" : ""} ${s.awaitingInput ? "awaiting-input" : ""} ${projectChild ? "project-child" : ""} ${room ? "room-row" : ""} ${s.color ? "colored" : ""}"
+      class="session-row ${active ? "active" : ""} ${menuOpen ? "menu-open" : ""} ${readOnly ? "read-only" : ""} ${refreshingTitle ? "title-refreshing" : ""} ${working ? "working" : ""} ${s.awaitingInput ? "awaiting-input" : ""} ${nested ? "project-child" : ""} ${room ? "room-row" : ""} ${s.color ? "colored" : ""}"
       style=${s.color ? `--session-color:${s.color}` : nothing}
     >
       <button
@@ -1049,17 +1205,6 @@ function renameInput(menuKey: string, ariaLabel: string, commit: () => Promise<v
 
 function toggleShowArchived(): void {
   showArchived = !showArchived;
-  renderList();
-}
-
-export function toggleWebOnly(): void {
-  sessionsState.webOnly = !sessionsState.webOnly;
-  try {
-    localStorage.setItem(WEB_ONLY_KEY, sessionsState.webOnly ? "1" : "0");
-  } catch {
-    void 0;
-  }
-  renderSidebarTop();
   renderList();
 }
 
@@ -1264,9 +1409,17 @@ export async function refreshSessions(
 }
 
 export async function openSession(s: CoreSession, entriesPrefetch?: Promise<TranscriptPage | null>): Promise<void> {
+  // The sidebar list is visible from any view now, so a row click may land while some other
+  // view is showing — route back to Chats first (as addBlankPane already does for the "new
+  // chat" split entry point) so there's somewhere for the transcript to mount.
+  if (appState.currentView !== "chats") switchView("chats");
   if (splitInterceptsOpen(s)) return;
   closeSidebarOnNarrowView();
   if (projectName(s.scopeId) && sessionsState.collapsedProjectScopes.delete(s.scopeId)) renderList();
+  // Same courtesy for a Slack channel: a thread opened from a deep link or the Chats page
+  // should be visible in the sidebar it just became the active row of.
+  const channelId = slackChannelIdOf(s.threadRef);
+  if (channelId && sessionsState.collapsedSlackChannels.delete(channelId)) renderList();
   return openSessionInto(mainConversation(), s, entriesPrefetch);
 }
 

@@ -31,6 +31,7 @@ export {
 } from "./identity.ts";
 export {
   mentionsBot,
+  mentionsSiblingBot,
   threadHasBotStake,
   shouldProcessMessage,
   isGroupMembershipMessage,

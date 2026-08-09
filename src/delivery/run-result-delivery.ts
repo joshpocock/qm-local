@@ -4,6 +4,8 @@ import type { DeliveryStore } from "./delivery-store.ts";
 import type { Task, TaskStore } from "../tasks/task-store.ts";
 import { SECURITY_QUARANTINE_REFUSAL_TEXT } from "../../plugins/chassis/src/security-quarantine.ts";
 import { resolveTurnOrigin } from "../core/turn-origin.ts";
+import { personaPostIdentity } from "./persona-identity.ts";
+import { isPanelPass } from "../agents/panel-driver.ts";
 
 export interface RunResultDelivery {
   destination: Destination;
@@ -17,11 +19,19 @@ export function runResultDelivery(run: Run, taskList: Task[] = []): RunResultDel
   const surface = run.request.surface;
   if (!target || !surface) return null;
   const editRef = run.deliveryState?.editRef;
+  // A panel CONTINUATION turn has no handler waiting on it: the surface submitted one turn and
+  // is holding the first persona's reply, while the driver runs the rest in the background. Its
+  // reply reaches the surface only through this queue, so it is tagged with its author — a
+  // surface that gives each persona its own identity posts it as that persona. The FIRST turn
+  // is deliberately left untagged: its handler posts it inline and this copy is pure recovery,
+  // which keeps today's recovery semantics byte-for-byte.
+  const panelAuthor = run.request.panel?.continuation ? run.request.panel.persona?.id : undefined;
   const destination: Destination = {
     type: surface,
     target,
     ...(editRef ? { editRef } : {}),
     ...(taskList.length ? { taskList: taskList.map(({ id, title, status }) => ({ id, title, status })) } : {}),
+    ...(surface === "slack" && panelAuthor ? { identity: personaPostIdentity(panelAuthor) } : {}),
   };
   const idempotencyKey = `run:${run.id}`;
   if (
@@ -32,6 +42,24 @@ export function runResultDelivery(run: Run, taskList: Task[] = []): RunResultDel
   ) {
     return { destination, text: SECURITY_QUARANTINE_REFUSAL_TEXT, idempotencyKey };
   }
+  // A persona that had nothing to add said nothing, and a surface must not see it either, or a
+  // quiet room fills with the word PASS. Quiet arrives in three shapes and all three are the
+  // same non-event here: the literal PASS reply (`isPanelPass` trims, so `"PASS\n"` and
+  // `" PASS "` are it too — the driver's matcher, never a second copy of the rule), a
+  // `status: "silent"` result, and a result carrying no reply text at all. The last two are
+  // what a spine-routed Slack panel turn actually produces: the reply never rides back on the
+  // result, so a delivery built from it would post nothing useful anyway. Attachments still
+  // travel — a persona that uploaded a file was not quiet.
+  // A turn that BROKE is not quiet — it keeps the failure notice the branch below posts.
+  if (
+    run.request.panel &&
+    !run.result?.attachments?.length &&
+    run.status !== "failed" &&
+    run.result?.status !== "failed" &&
+    run.result?.status !== "refused" &&
+    (run.result?.status === "silent" || isPanelPass(run.result?.reply) || !(run.result?.reply ?? "").trim())
+  )
+    return null;
   if (run.request.surfaceTools && run.result?.status !== "failed" && !run.result?.attachments?.length) return null;
   if (run.status === "failed") {
     if (resolveTurnOrigin(run.request).kind === "ambient") return null;

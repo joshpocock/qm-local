@@ -56,7 +56,6 @@ import {
   renderList,
   resetSessionsState,
   sessionsState,
-  toggleWebOnly,
 } from "./sessions";
 import { openCronById, renderCronsPage, resetActiveCron, routeCronsHistory } from "./crons";
 import { renderFiles } from "./files";
@@ -571,25 +570,7 @@ export function renderSidebarTop(): void {
           `,
         )}
       </nav>
-      ${
-        appState.currentView === "chats"
-          ? html`
-              <div class="section-label recents-label">
-                <span>Sessions</span>
-                <button
-                  class="web-only-toggle ${sessionsState.webOnly ? "on" : ""}"
-                  type="button"
-                  role="switch"
-                  aria-checked=${sessionsState.webOnly ? "true" : "false"}
-                  title=${sessionsState.webOnly ? "Showing web chats only" : "Hide non-web conversations"}
-                  @click=${toggleWebOnly}
-                >
-                  <span>Web only</span><span class="mini-switch"><span class="mini-knob"></span></span>
-                </button>
-              </div>
-            `
-          : ""
-      }
+      <div class="section-label recents-label"><span>Sessions</span></div>
     `,
     appState.topEl,
   );
@@ -621,12 +602,13 @@ export function switchView(v: View): void {
   }
   renderSidebarTop();
   syncUrlFromState();
-  if (v !== "chats" && appState.listEl) render(nothing, appState.listEl);
+  // The session list is persistent chrome now — it lives in every view, not just Chats — so
+  // it gets a fresh paint on every switch instead of being blanked away from non-chats views.
+  renderList();
   switch (v) {
     case "chats":
       if (splitState.active) drawCanvas();
       else void renderChatsPage();
-      renderList();
       break;
     case "crons":
       resetActiveCron();
@@ -808,7 +790,9 @@ window.addEventListener("popstate", () => {
 window.addEventListener("focus", () => {
   if (!appState.me) return;
   if (appState.currentView === "contexts") void renderContexts();
-  else if (appState.currentView === "chats") void refreshSessions({ silent: true, refreshContexts: true });
+  // The session list is persistent chrome, so it earns the same on-focus refresh regardless
+  // of which view it's showing alongside; only the extra contexts refresh stays chats-only.
+  void refreshSessions({ silent: true, refreshContexts: appState.currentView === "chats" });
 });
 
 function warmDeferredChunks(): void {

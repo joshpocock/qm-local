@@ -24,6 +24,16 @@ export interface StoredSlackBot {
   teamId?: string;
   teamName?: string;
   /**
+   * The bot's Slack handle (`auth.test`'s `user`, e.g. `qm-codex`) and its `U…` user id, so a
+   * surface can say WHICH bot an agent answers as. Not secrets — the whole workspace sees the
+   * handle — so they sit in the clear beside the encrypted tokens and are safe to echo.
+   *
+   * Absent on every record written before these fields existed; a later token rotation
+   * re-runs `auth.test` and backfills them. Nothing may assume they are present.
+   */
+  botHandle?: string;
+  botUserId?: string;
+  /**
    * Why this bot is not running, if it isn't — an events-mode mismatch, or a start that threw.
    * Deliberately NOT part of `version`: recording an error must never look like a config change,
    * or the reconciler would restart the bot on its own failure report.
@@ -47,6 +57,9 @@ export interface SlackBotRecord {
   enabled: boolean;
   teamId?: string;
   teamName?: string;
+  /** See `StoredSlackBot.botHandle`. */
+  botHandle?: string;
+  botUserId?: string;
   lastError?: string;
   createdAt: number;
   updatedAt: number;
@@ -62,6 +75,9 @@ export interface SlackBotView {
   enabled: boolean;
   teamId?: string;
   teamName?: string;
+  /** See `StoredSlackBot.botHandle`. */
+  botHandle?: string;
+  botUserId?: string;
   lastError?: string;
   lastErrorAt?: number;
   createdAt: number;
@@ -78,6 +94,8 @@ export interface NewSlackBot {
   enabled?: boolean;
   teamId?: string;
   teamName?: string;
+  botHandle?: string;
+  botUserId?: string;
   updatedBy: string;
 }
 
@@ -89,6 +107,8 @@ export interface SlackBotPatch {
   enabled?: boolean;
   teamId?: string;
   teamName?: string;
+  botHandle?: string;
+  botUserId?: string;
   updatedBy: string;
 }
 
@@ -149,6 +169,8 @@ export function createSlackBotRegistry(
     enabled: r.enabled,
     ...(r.teamId ? { teamId: r.teamId } : {}),
     ...(r.teamName ? { teamName: r.teamName } : {}),
+    ...(r.botHandle ? { botHandle: r.botHandle } : {}),
+    ...(r.botUserId ? { botUserId: r.botUserId } : {}),
     ...(r.lastError ? { lastError: r.lastError } : {}),
     ...(r.lastErrorAt ? { lastErrorAt: r.lastErrorAt } : {}),
     createdAt: r.createdAt,
@@ -166,6 +188,8 @@ export function createSlackBotRegistry(
     enabled: r.enabled,
     ...(r.teamId ? { teamId: r.teamId } : {}),
     ...(r.teamName ? { teamName: r.teamName } : {}),
+    ...(r.botHandle ? { botHandle: r.botHandle } : {}),
+    ...(r.botUserId ? { botUserId: r.botUserId } : {}),
     ...(r.lastError ? { lastError: r.lastError } : {}),
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
@@ -205,6 +229,8 @@ export function createSlackBotRegistry(
         enabled: input.enabled ?? true,
         ...(input.teamId ? { teamId: input.teamId } : {}),
         ...(input.teamName ? { teamName: input.teamName } : {}),
+        ...(input.botHandle ? { botHandle: input.botHandle } : {}),
+        ...(input.botUserId ? { botUserId: input.botUserId } : {}),
         createdAt: now,
         updatedAt: now,
         updatedBy: input.updatedBy,
@@ -227,6 +253,8 @@ export function createSlackBotRegistry(
         ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
         ...(patch.teamId !== undefined ? { teamId: patch.teamId } : {}),
         ...(patch.teamName !== undefined ? { teamName: patch.teamName } : {}),
+        ...(patch.botHandle !== undefined ? { botHandle: patch.botHandle } : {}),
+        ...(patch.botUserId !== undefined ? { botUserId: patch.botUserId } : {}),
         updatedAt: now,
         updatedBy: patch.updatedBy,
         version: `${now}:${randomUUID()}`,

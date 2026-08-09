@@ -4702,11 +4702,11 @@
           <div id="view-connectors" class="hidden">
             <section class="card" id="card-connectors">
               <div class="head">
-                <h2>Connector OAuth clients</h2>
+                <h2>Sign-in apps (OAuth)</h2>
                 <p>
-                  Each connector needs its own OAuth app's client ID and secret before anyone can link it. A connector
-                  stays hidden in everyone's web UI until you set its client here. The secret is write-only and never
-                  displayed. Applies org-wide.
+                  How a person links their OWN account so an agent can act as them &mdash; Slack, Google, and the rest.
+                  These are client ID/secret pairs, not bots: nothing here posts as an agent. Each connector stays
+                  hidden in everyone's web UI until you set its client. Secrets are write-only. Applies org-wide.
                 </p>
               </div>
               <div class="body"><div id="conn-list" class="hint">No connectors configured.</div></div>
@@ -4752,10 +4752,11 @@
             </section>
             <section class="card" id="card-slack-installation">
               <div class="head">
-                <h2>Slack bot</h2>
+                <h2>Default Slack bot</h2>
                 <p>
-                  Add Slack after the web deployment is working. Tokens are validated with Slack, encrypted in durable
-                  storage, and never displayed again.
+                  The workspace bot that answers mentions and DMs, and delivers crons. It may use the same Slack app as
+                  the sign-in connector above, but these are its BOT tokens &mdash; a different credential doing a
+                  different job. Tokens are validated with Slack, encrypted, and never displayed again.
                 </p>
               </div>
               <div class="body">
@@ -4787,9 +4788,36 @@
                     placeholder="xapp-…"
                     style="width: 100%"
                 /></label>
+                <label style="display: block; margin-bottom: 8px"
+                  >Answers as (in debates)
+                  <select id="slack-installation-panel-persona" style="width: 100%">
+                    <option value="">Default org agent</option>
+                  </select></label>
+                <label style="display: block; margin-bottom: 8px"
+                  >Debate rounds
+                  <input
+                    type="number"
+                    id="slack-installation-panel-rounds"
+                    min="1"
+                    max="20"
+                    step="1"
+                    placeholder="Deployment default"
+                    style="width: 100%"
+                /></label>
+                <p class="field-hint">
+                  A round is one pass over the agents mentioned. A debate posts at most agents × rounds × 2 messages
+                  (each agent can be granted one bonus turn per round by being mentioned), and a round in which every
+                  agent passes ends it early. Leave blank to use the deployment default. Takes effect within seconds,
+                  including in threads that already held a debate.
+                </p>
                 <p class="field-hint">
                   Use an app-level token with <code>connections:write</code>. Saving activates or reloads the Slack
                   surface within a few seconds.
+                </p>
+                <p class="field-hint">
+                  The debate agent applies only when this bot is mentioned alongside another agent bot: on its own it
+                  keeps answering as the default org agent, on the runtime model chosen for the scope. Leave the tokens
+                  blank to change just the debate settings.
                 </p>
               </div>
               <div class="foot">
@@ -4800,11 +4828,11 @@
             </section>
             <section class="card" id="card-slack-bots">
               <div class="head">
-                <h2>Slack bots</h2>
+                <h2>Per-agent Slack bots</h2>
                 <p>
-                  Additional Slack apps beyond the default bot above, each optionally bound to an agent persona. A
-                  persona-bound bot answers as that persona; additional bots require Socket Mode. Tokens are validated
-                  with Slack, encrypted in durable storage, and never displayed again.
+                  One extra Slack app per agent, so an agent can live in Slack under its own name and be @mentioned
+                  directly. Each needs its OWN Slack app &mdash; two bots cannot share one app. Requires Socket Mode.
+                  Tokens are validated with Slack, encrypted, and never displayed again.
                 </p>
               </div>
               <div class="body">
@@ -7417,8 +7445,9 @@
         $("conn-client-id").value = c.clientId || "";
         $("conn-client-secret").value = "";
         $("conn-client-secret").placeholder = c.hasSecret ? "•••• set (re-enter to replace)" : "(write-only)";
-        $("conn-secret-hint").textContent =
-          "Saving requires the client secret — re-enter it to keep this connector working.";
+        $("conn-secret-hint").textContent = c.hasSecret
+          ? "Leave blank to keep the saved secret. Enter a new one only to replace it."
+          : "This connector has no secret saved yet — enter one to finish it.";
         $("conn-enabled").checked = c.enabled !== false;
         renderConnList(connList);
         $("card-connectors").scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -7442,12 +7471,20 @@
         if (connList.length) renderConnList(connList);
       }
       $("conn-provider").onchange = renderConnGuide;
+      // Whether the default bot has stored tokens; a debate-agent-only save needs a record to
+      // attach itself to, so the button says so instead of failing on the round trip.
+      let slackInstallationConfigured = false;
       async function loadSlackInstallation() {
-        const r = await api("GET", "/api/slack-installation");
+        const [r] = await Promise.all([api("GET", "/api/slack-installation"), loadSlackBotAgents()]);
         if (!r.ok) {
           setStatus("st-slack-installation", r.data?.message || "Failed to load Slack status.", "err");
           return;
         }
+        slackInstallationConfigured = Boolean(r.data.configured);
+        setSlackPanelPersona(r.data.panelPersonaId || "");
+        // Blank means "no admin choice" — the deployment's QM_SLACK_PANEL_ROUNDS, then 1.
+        $("slack-installation-panel-rounds").value =
+          typeof r.data.panelRounds === "number" ? String(r.data.panelRounds) : "";
         if (r.data.createUrl) $("slack-installation-create").href = r.data.createUrl;
         $("slack-installation-state").textContent =
           r.data.source === "environment"
@@ -7466,13 +7503,33 @@
       $("slack-installation-save").onclick = async () => {
         const botToken = $("slack-bot-token").value.trim();
         const appToken = $("slack-app-token").value.trim();
-        if (!botToken || !appToken) {
+        const panelPersonaId = $("slack-installation-panel-persona").value.trim();
+        const roundsRaw = $("slack-installation-panel-rounds").value.trim();
+        // Blank clears the setting back to the deployment default; anything else must be a whole
+        // number in range, checked here so a typo never costs a round trip.
+        const panelRounds = roundsRaw ? Number(roundsRaw) : null;
+        if (roundsRaw && (!Number.isInteger(panelRounds) || panelRounds < 1 || panelRounds > 20)) {
+          setStatus("st-slack-installation", "Debate rounds must be a whole number from 1 to 20.", "err");
+          return;
+        }
+        // Tokens are write-only and never shown again, so changing the debate settings alone must
+        // not demand them back. Both blank means "just the debate settings".
+        const agentOnly = !botToken && !appToken;
+        if (!agentOnly && (!botToken || !appToken)) {
           setStatus("st-slack-installation", "Both Slack tokens are required.", "err");
           return;
         }
+        if (agentOnly && !slackInstallationConfigured) {
+          setStatus("st-slack-installation", "Save both Slack tokens first.", "err");
+          return;
+        }
         $("slack-installation-save").disabled = true;
-        setStatus("st-slack-installation", "Validating with Slack…", "saving", true);
-        const r = await api("PUT", "/api/slack-installation", { botToken, appToken });
+        setStatus("st-slack-installation", agentOnly ? "Saving…" : "Validating with Slack…", "saving", true);
+        const r = await api("PUT", "/api/slack-installation", {
+          ...(agentOnly ? {} : { botToken, appToken }),
+          panelPersonaId: panelPersonaId || null,
+          panelRounds,
+        });
         $("slack-installation-save").disabled = false;
         if (!r.ok) {
           setStatus("st-slack-installation", r.data?.message || "Slack validation failed.", "err");
@@ -7481,7 +7538,7 @@
         $("slack-bot-token").value = "";
         $("slack-app-token").value = "";
         await loadSlackInstallation();
-        setStatus("st-slack-installation", "Saved. Slack is activating.", "ok");
+        setStatus("st-slack-installation", agentOnly ? "Saved." : "Saved. Slack is activating.", "ok");
       };
       $("slack-installation-delete").onclick = async () => {
         if (!confirm("Remove the Slack bot connection? Slack chat will stop until new tokens are saved.")) return;
@@ -7498,22 +7555,40 @@
       // id → name for every persona the admin can see; raw ids still render when a bot is
       // bound to a persona outside that set (e.g. someone's personal-scope agent).
       let slackBotAgentNames = new Map();
+      // Both agent pickers: the new-bot one (which persona a whole extra bot answers as) and the
+      // default bot's debate picker (which persona it answers as in a room panel, and only there).
       async function loadSlackBotAgents() {
         const r = await api("GET", "/api/slack-bots/agents");
         if (!r.ok || !Array.isArray(r.data?.agents)) return;
         slackBotAgentNames = new Map(r.data.agents.map((a) => [a.id, a.name]));
-        const sel = $("slack-bot-new-persona");
+        for (const id of ["slack-bot-new-persona", "slack-installation-panel-persona"]) {
+          const sel = $(id);
+          if (!sel) continue;
+          const previous = sel.value;
+          while (sel.options.length > 1) sel.remove(1);
+          for (const a of r.data.agents) {
+            if (!a.enabled) continue;
+            const opt = document.createElement("option");
+            opt.value = a.id;
+            opt.textContent = a.name;
+            sel.append(opt);
+          }
+          sel.value = previous && slackBotAgentNames.has(previous) ? previous : "";
+        }
+      }
+      // A stored binding can name an agent this admin cannot see (someone's personal-scope
+      // agent), which has no option to select — show the raw id rather than silently resetting
+      // the picker to "Default org agent" and inviting a save that unbinds it.
+      function setSlackPanelPersona(personaId) {
+        const sel = $("slack-installation-panel-persona");
         if (!sel) return;
-        const previous = sel.value;
-        while (sel.options.length > 1) sel.remove(1);
-        for (const a of r.data.agents) {
-          if (!a.enabled) continue;
+        if (personaId && ![...sel.options].some((o) => o.value === personaId)) {
           const opt = document.createElement("option");
-          opt.value = a.id;
-          opt.textContent = a.name;
+          opt.value = personaId;
+          opt.textContent = slackBotAgentNames.get(personaId) || personaId;
           sel.append(opt);
         }
-        sel.value = previous && slackBotAgentNames.has(previous) ? previous : "";
+        sel.value = personaId || "";
       }
       function renderSlackBotsList(bots) {
         slackBots = bots;
@@ -7692,7 +7767,9 @@
           setStatus("st-connectors", "Client ID is required.", "err");
           return;
         }
-        if (!clientSecret) {
+        // Editing an existing connector keeps the stored secret when this is left blank; only a
+        // brand-new one has nothing on the server to fall back to.
+        if (!clientSecret && !connEditing) {
           setStatus("st-connectors", "Client secret is required.", "err");
           return;
         }
@@ -7701,7 +7778,7 @@
         const r = await api("PUT", "/api/scopes/" + encodeURIComponent(orgScope()) + "/connectors", {
           provider,
           clientId,
-          clientSecret,
+          ...(clientSecret ? { clientSecret } : {}),
           enabled: $("conn-enabled").checked,
         });
         $("conn-save").disabled = false;

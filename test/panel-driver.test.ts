@@ -20,10 +20,12 @@ import {
   panelTurnCeiling,
   PANEL_PASS,
   isPanelPass,
+  isPanelQuiet,
   panelAddressed,
   panelMembersFrom,
   panelMentions,
   renderPanelSystemBlock,
+  requestedPanelRounds,
   runPanel,
   type PanelMember,
   type PanelTurnSpec,
@@ -158,6 +160,49 @@ test("a round in which every agent PASSes ends the panel; the next round never r
   );
 });
 
+test("a silent-status turn is quiet: an all-silent round ends the panel and invites nobody", async () => {
+  // What a Slack panel turn actually hands back. The surface runs every channel turn through
+  // the spine (`surfaceTools`), so the orchestrator's terminal result is `silent` with no
+  // reply at all — the PASS text never rides back. Read as "not a PASS" this ground a settled
+  // room through every round it had, and posted a PASS into the thread on each one.
+  const taken: string[] = [];
+  await runPanel({
+    members: [ALICE, BRAVO],
+    rounds: 3,
+    text: "go",
+    state: { abort: false },
+    run: async (spec) => {
+      taken.push(`${spec.persona.name}@${spec.round}`);
+      return { status: "silent" };
+    },
+  });
+  assert.deepEqual(taken, ["Alfa@1", "Bravo@1"], "two members, one round, then the room is settled");
+
+  // Quiet also means "granted nobody a turn": a silent result's text, whatever it holds, was
+  // never said, so it cannot buy a bonus turn.
+  const invited: string[] = [];
+  await runPanel({
+    members: [ALICE],
+    invitable: [ALICE, BRAVO],
+    rounds: 1,
+    text: "go",
+    state: { abort: false },
+    run: async (spec) => {
+      invited.push(spec.persona.name);
+      return { status: "silent", reply: "@Bravo what do you think?" };
+    },
+  });
+  assert.deepEqual(invited, ["Alfa"], "a silent turn grants no mention bonus turn");
+
+  assert.equal(isPanelQuiet({ status: "silent" }), true);
+  assert.equal(isPanelQuiet({ status: "ok", reply: "PASS\n" }), true, "the PASS matcher trims");
+  assert.equal(isPanelQuiet({ status: "ok", reply: "   " }), true, "an empty reply said nothing");
+  assert.equal(isPanelQuiet({ reply: "a real answer" }), false);
+  assert.equal(isPanelQuiet({ status: "failed" }), false, "a broken turn is not settled");
+  assert.equal(isPanelQuiet({ status: "refused" }), false);
+  assert.equal(isPanelQuiet(undefined), true);
+});
+
 test("a round with one PASS and one substantive reply continues to the next round", async () => {
   const s = scripted({ Alfa: PANEL_PASS, Bravo: "there is still the pricing table" });
   await runPanel({ members: [ALICE, BRAVO], rounds: 2, text: "go", state: { abort: false }, run: s.run });
@@ -246,6 +291,36 @@ test("renderPanelSystemBlock states the round position, and says so plainly on t
     none,
     "the round line is appended; every other word of the block is unchanged",
   );
+});
+
+test("a roster of one gets its persona and nothing else — no roster, no @Name, no PASS, no rounds", () => {
+  // Every persona-bound Slack bot runs its ORDINARY turns through this block, as a room of
+  // one. Told it may "reply exactly PASS" a lone bot takes the offer, which is how a plain
+  // "hey how are u" was answered with silence.
+  const speaker = fakePersona({ id: "ap_1", name: "Scout", glyph: "SC", instructions: "You are Scout." });
+  const solo = renderPanelSystemBlock(speaker, [speaker], { round: 1, rounds: 1 });
+
+  assert.match(solo, /You are Scout\./, "the persona's own instructions still land");
+  assert.match(solo, /You are "Scout" \(SC\)\./, "and it still knows who it is");
+  assert.doesNotMatch(solo, /PASS/, "a lone agent is never invited to say nothing");
+  assert.doesNotMatch(solo, /one of several agents/);
+  assert.doesNotMatch(solo, /@Name/);
+  assert.doesNotMatch(solo, /round/i, "a room of one has no round budget worth stating");
+  assert.match(solo, /organization policy above is authoritative/, "the SOUL precedence wording is untouched");
+
+  // An empty roster degrades to the speaker alone and is the same solo block.
+  assert.equal(renderPanelSystemBlock(speaker, [], { round: 1, rounds: 1 }), solo);
+  // A position the driver did not supply changes nothing either.
+  assert.equal(renderPanelSystemBlock(speaker, [speaker]), solo);
+
+  // Two members is a room again, with every convention back.
+  const room = renderPanelSystemBlock(speaker, [speaker, fakePersona({ id: "ap_2", name: "Critic", glyph: "CR" })], {
+    round: 1,
+    rounds: 1,
+  });
+  assert.match(room, /one of several agents/);
+  assert.match(room, new RegExp(`reply exactly ${PANEL_PASS}`));
+  assert.match(room, /This is round 1 of 1/);
 });
 
 test("mention matching is case-insensitive and respects name boundaries", () => {
@@ -1239,4 +1314,151 @@ test("a PASS reply never reaches the transcript — it is a signal, not somethin
     false,
     "no stored assistant entry is the bare word PASS",
   );
+});
+
+// ---------------------------------------------------------------------------
+// Rounds precedence: a persisted room owns its ROSTER, but a request that carries
+// a room owns that dispatch's ROUNDS. This is what lets an operator change the
+// Slack "Debate rounds" setting and have it take effect in a thread that already
+// held a panel, instead of being frozen at whatever the first panel used.
+// ---------------------------------------------------------------------------
+
+/** The turn body `src/slack/turn-handler.ts` builds for a Slack panel dispatch. */
+const panelTurn = (threadRef: string, text: string, room: RoomConfig): TurnRequest => ({
+  ...webTurn(threadRef, text),
+  room,
+});
+
+test("a request-borne room into a PERSISTED room takes the request's rounds and the persisted roster", async () => {
+  const built = freshApp();
+  const threadRef = "web:U1:rounds-precedence";
+  const { session, personas } = await openRoom(built, threadRef, (ids) => ({ personaIds: ids, rounds: 1 }), [
+    "Scout",
+    "Critic",
+  ]);
+  // A roster the request would install if rosters moved with rounds. They do not.
+  const nomad = await makePersona(built, "Nomad");
+
+  const before = await lastSeq(built, session.id);
+  const result = await built.app.turn(
+    panelTurn(threadRef, "kick it around, you two", { personaIds: [nomad.id], rounds: 2 }),
+  );
+  assert.notEqual(result.status, "refused", result.reason);
+
+  const spoke = await spokeSince(built, session.id, before);
+  assert.deepEqual(spoke, ["Scout", "Critic", "Scout", "Critic"], "the request's rounds=2 ran, over the STORED roster");
+  assert.equal(spoke.includes("Nomad"), false, "the request cannot install a roster over a persisted one");
+  assert.deepEqual(
+    await roomOf(built, session.id),
+    { personaIds: personas.map((p) => p.id), rounds: 1 },
+    "and the stored room is left exactly as its owner configured it — rounds are per dispatch, not persisted",
+  );
+});
+
+test("a later dispatch's rounds wins again: the setting is re-read every message, never frozen", async () => {
+  const built = freshApp();
+  const threadRef = "web:U1:rounds-rechosen";
+  const { session } = await openRoom(built, threadRef, (ids) => ({ personaIds: ids, rounds: 1 }), ["Scout", "Critic"]);
+  const roster = (await roomOf(built, session.id))!.personaIds;
+
+  // First panel at 1 round — the message that would otherwise have frozen the thread at 1.
+  let before = await lastSeq(built, session.id);
+  assert.notEqual(
+    (await built.app.turn(panelTurn(threadRef, "round one", { personaIds: roster, rounds: 1 }))).status,
+    "refused",
+  );
+  assert.equal((await spokeSince(built, session.id, before)).length, 2, "two agents, one round");
+
+  // The admin raises the setting; the very next message in the SAME thread uses it.
+  before = await lastSeq(built, session.id);
+  assert.notEqual(
+    (await built.app.turn(panelTurn(threadRef, "now go deeper", { personaIds: roster, rounds: 3 }))).status,
+    "refused",
+  );
+  assert.equal(
+    (await spokeSince(built, session.id, before)).length,
+    6,
+    "two agents, three rounds — no restart, no redeploy",
+  );
+
+  // …and lowering it takes effect just as immediately.
+  before = await lastSeq(built, session.id);
+  assert.notEqual(
+    (await built.app.turn(panelTurn(threadRef, "wrap it up", { personaIds: roster, rounds: 1 }))).status,
+    "refused",
+  );
+  assert.equal((await spokeSince(built, session.id, before)).length, 2, "back down to one round");
+});
+
+test("a turn with NO room in the request still uses the PERSISTED rounds (web-UI regression)", async () => {
+  const built = freshApp();
+  const threadRef = "web:U1:rounds-persisted-wins";
+  // A web room whose owner chose three rounds. The web client sends `room` only on the first
+  // message of a brand-new room, so every later turn arrives without one — and must keep
+  // running at the rounds the room was configured with.
+  const { session } = await openRoom(built, threadRef, (ids) => ({ personaIds: ids, rounds: 3 }), ["Scout", "Critic"]);
+
+  const before = await lastSeq(built, session.id);
+  const result = await built.app.turn(webTurn(threadRef, "what do you make of it?"));
+  assert.notEqual(result.status, "refused", result.reason);
+
+  assert.equal(
+    (await spokeSince(built, session.id, before)).length,
+    6,
+    "two agents x the room's own three rounds; nothing about the no-room path moved",
+  );
+  assert.deepEqual((await roomOf(built, session.id))!.rounds, 3, "and the stored rounds are untouched");
+});
+
+test("a request-borne room with no rounds at all overrides nothing, and a bad one is refused", async () => {
+  const built = freshApp();
+  const threadRef = "web:U1:rounds-absent";
+  const { session } = await openRoom(built, threadRef, (ids) => ({ personaIds: ids, rounds: 2 }), ["Scout", "Critic"]);
+  const roster = (await roomOf(built, session.id))!.personaIds;
+
+  // A client that sends a roster but no rounds is not choosing a number, so the persisted one
+  // stands. (`rounds` is required by the type; this is the untyped-client case.)
+  const before = await lastSeq(built, session.id);
+  const noRounds = await built.app.turn(
+    panelTurn(threadRef, "you two", { personaIds: roster } as unknown as RoomConfig),
+  );
+  assert.notEqual(noRounds.status, "refused", noRounds.reason);
+  assert.equal((await spokeSince(built, session.id, before)).length, 4, "two agents x the STORED two rounds");
+
+  // A rounds value that is present but out of range is refused with the same message the
+  // first-message path uses, rather than silently ignored.
+  for (const rounds of [0, 3.5, -1, ROOM_MAX_ROUNDS + 1]) {
+    const bad = await built.app.turn(panelTurn(threadRef, "you two", { personaIds: roster, rounds }));
+    assert.equal(bad.status, "refused", `rounds: ${rounds}`);
+    assert.match(bad.reason ?? "", /room\.rounds must be 1-20/);
+  }
+  assert.deepEqual((await roomOf(built, session.id))!.rounds, 2, "a refusal changes nothing about the stored room");
+});
+
+// ---------------------------------------------------------------------------
+// requestedPanelRounds — the message-stated budget
+// ---------------------------------------------------------------------------
+
+test("a stated count attached to a turn-taking noun is honoured", () => {
+  assert.equal(requestedPanelRounds("go back and forth 4 times"), 4);
+  assert.equal(requestedPanelRounds("debate this for 2 rounds"), 2);
+  assert.equal(requestedPanelRounds("take 3 turns each"), 3);
+  assert.equal(requestedPanelRounds("1 round only please"), 1);
+});
+
+test("a bare number is not a budget", () => {
+  assert.equal(requestedPanelRounds("give me 4 options for a CRM"), undefined);
+  assert.equal(requestedPanelRounds("we have 3 customers"), undefined);
+  assert.equal(requestedPanelRounds("norounds 4 timestamp"), undefined);
+});
+
+test("nothing stated means undefined, not a default", () => {
+  assert.equal(requestedPanelRounds("keep going until you agree"), undefined);
+  assert.equal(requestedPanelRounds(""), undefined);
+  assert.equal(requestedPanelRounds(undefined), undefined);
+});
+
+test("a stated count is clamped to ROOM_MAX_ROUNDS and zero is ignored", () => {
+  assert.equal(requestedPanelRounds("go 99 rounds"), ROOM_MAX_ROUNDS);
+  assert.equal(requestedPanelRounds("0 rounds"), undefined);
 });

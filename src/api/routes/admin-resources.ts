@@ -621,12 +621,24 @@ export const ADMIN_RESOURCES: readonly AdminResource[] = [
         await deps.config!.deleteConnectorClient(scope, provider);
         return { ok: true };
       }
-      if (typeof b.clientId !== "string" || typeof b.clientSecret !== "string") {
-        return { error: "connectors requires { provider, clientId, clientSecret }" };
+      if (typeof b.clientId !== "string") {
+        return { error: "connectors requires { provider, clientId }" };
+      }
+      // The secret is write-only, so an operator editing anything else about an existing
+      // connector — the client id, the scopes, the enabled flag — had to retype a value the UI
+      // can never show them. Omitting it now means "keep the stored one"; only a non-empty
+      // string replaces it. A connector that has no secret yet still needs one.
+      const storedSecret =
+        typeof b.clientSecret === "string" && b.clientSecret
+          ? undefined
+          : (await deps.config!.getConnectorClientSecret(scope, provider))?.clientSecret;
+      const clientSecret = typeof b.clientSecret === "string" && b.clientSecret ? b.clientSecret : storedSecret;
+      if (!clientSecret) {
+        return { error: "this connector has no stored client secret yet — provide clientSecret" };
       }
       await deps.config!.setConnectorClient(scope, provider, {
         clientId: b.clientId,
-        clientSecret: b.clientSecret,
+        clientSecret,
         ...(Array.isArray(b.scopes) ? { scopes: b.scopes.map(String) } : {}),
         ...(Array.isArray(b.redirectAllowlist) ? { redirectAllowlist: b.redirectAllowlist.map(String) } : {}),
         ...(typeof b.consentMode === "string" ? { consentMode: b.consentMode as ConsentMode } : {}),

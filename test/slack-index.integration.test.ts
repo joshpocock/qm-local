@@ -223,6 +223,14 @@ class FakeCore implements SlackCoreClient {
     return undefined;
   }
   async recordAckPick(): Promise<void> {}
+  personaNames = new Map<string, string>();
+  async personaName(personaId: string): Promise<string | undefined> {
+    return this.personaNames.get(personaId);
+  }
+  async personaHeader(personaId: string): Promise<{ name: string; modelName: string } | undefined> {
+    const name = this.personaNames.get(personaId);
+    return name ? { name, modelName: `${name}-model` } : undefined;
+  }
   async ingestSurfaceEvents(events: any[]): Promise<void> {
     this.ingests.push(events);
   }
@@ -306,11 +314,15 @@ async function fixture(
     externalParticipants?: boolean;
     webUiPublicUrl?: string;
     personaId?: string;
+    panelPersonaId?: string;
+    personaNames?: Record<string, string>;
     secondary?: boolean;
   } = {},
 ) {
   const core = new FakeCore();
   core.externalParticipants = options.externalParticipants ?? false;
+  // Seeded BEFORE start: the plugin resolves its persona's `@Name` during startup.
+  for (const [id, name] of Object.entries(options.personaNames ?? {})) core.personaNames.set(id, name);
   const started = startSlackPlugin(
     {
       botToken: "xoxb-test",
@@ -318,6 +330,7 @@ async function fixture(
       identityEmail: "0",
       ...(options.webUiPublicUrl ? { webUiPublicUrl: options.webUiPublicUrl } : {}),
       ...(options.personaId ? { personaId: options.personaId } : {}),
+      ...(options.panelPersonaId ? { panelPersonaId: options.panelPersonaId } : {}),
       ...(options.secondary ? { secondary: true } : {}),
     },
     core,
@@ -910,6 +923,35 @@ test("the default bot never sends a room roster, so today's behaviour is untouch
     await f.app.emitMessage({ channel: "D1", channel_type: "im", user: "U1", text: "hello", ts: "902.1" });
     assert.equal(f.core.turns.length, 1);
     assert.equal(f.core.turns[0].room, undefined);
+  } finally {
+    await f.stop();
+  }
+});
+
+test("a PANEL persona leaves the default bot's own turns and its DM header alone", async () => {
+  const f = await fixture({
+    panelPersonaId: "persona-host",
+    personaNames: { "persona-host": "Host" },
+    webUiPublicUrl: "https://claw.example.dev",
+  });
+  try {
+    await f.app.emitMessage({ channel: "D1", channel_type: "im", user: "U1", text: "hello", ts: "904.1" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(f.core.turns.length, 1);
+    assert.equal(f.core.turns[0].room, undefined, "a panel persona is not an every-turn persona");
+    // `headerFacts` is keyed on the EVERY-TURN persona, so the header still announces the
+    // scope's runtime model rather than the debate persona's ("Host-model").
+    assert.deepEqual(f.client.topics, [
+      {
+        channel: "D1",
+        topic:
+          "Quartermaster is using Claude Opus 4.8 here. <https://claw.example.dev/contexts?scope=personal%3AU1|More settings>",
+      },
+    ]);
+    assert.deepEqual(
+      f.client.posts.map((p) => p.text),
+      ["agent reply"],
+    );
   } finally {
     await f.stop();
   }

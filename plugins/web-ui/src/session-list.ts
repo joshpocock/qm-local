@@ -64,11 +64,19 @@ export function isRoomSession(s: Pick<CoreSession, "room">): boolean {
 /**
  * Lifts rooms into their own section, exactly as `splitPinned` lifts pinned rows. Both
  * halves keep the order they came in with, so the caller's recency sort still holds.
+ *
+ * Slack-surface rows are deliberately *not* lifted, however many personas their roster
+ * carries. A Slack room panel is one session per thread, so five debate threads in one
+ * channel would otherwise appear five times under Rooms *and* again under their channel in
+ * the Slack section. Slack sessions have exactly one home — the Slack section, under the
+ * channel they live in — and `splitSlack` puts them there.
  */
-export function splitRooms<T extends Pick<CoreSession, "room">>(sessions: readonly T[]): { rooms: T[]; rest: T[] } {
+export function splitRooms<T extends Pick<CoreSession, "room" | "threadRef">>(
+  sessions: readonly T[],
+): { rooms: T[]; rest: T[] } {
   const rooms: T[] = [];
   const rest: T[] = [];
-  for (const s of sessions) (isRoomSession(s) ? rooms : rest).push(s);
+  for (const s of sessions) (isRoomSession(s) && surfaceOf(s) !== "slack" ? rooms : rest).push(s);
   return { rooms, rest };
 }
 
@@ -83,6 +91,78 @@ export function splitSlack<T extends Pick<CoreSession, "threadRef">>(sessions: r
   const rest: T[] = [];
   for (const s of sessions) (surfaceOf(s) === "slack" ? slack : rest).push(s);
   return { slack, rest };
+}
+
+/**
+ * The Slack channel a thread-session belongs to, or `null` for anything that is not one.
+ *
+ * A channel thread's `threadRef` is `ch:<CHANNELID>:<rootTs>` — the channel id is the middle
+ * segment, and it is the only part two threads of the same channel share. DMs (`dm:<ID>`)
+ * are not channels and return `null`, which is what keeps them rendering flat.
+ */
+export function slackChannelIdOf(threadRef: string): string | null {
+  if (!threadRef.startsWith("ch:")) return null;
+  const end = threadRef.indexOf(":", 3);
+  return (end === -1 ? threadRef.slice(3) : threadRef.slice(3, end)) || null;
+}
+
+export type SlackListItem =
+  | { kind: "session"; session: CoreSession }
+  | { kind: "channel"; channelId: string; name: string | null; sessions: CoreSession[] };
+
+/**
+ * Whether a Slack channel is private, per the workspace directory `/api/contexts` already
+ * syncs into the client (`contextsFor` in `src/api/app-helpers.ts` mints the scope id
+ * `channel:<CHANNELID>` from the same raw Slack channel id `slackChannelIdOf` reads out of a
+ * `ch:` threadRef, so the two join with no format translation needed).
+ *
+ * Absent contexts — not yet loaded, or a channel the viewer's directory sync hasn't surfaced
+ * — read as "unknown", not "public": the heading shows no chip rather than asserting the
+ * wrong one.
+ */
+export function isPrivateSlackChannel(
+  channelId: string,
+  contexts: readonly Pick<CoreContext, "scopeId" | "isPrivate">[],
+): boolean {
+  return contexts.find((c) => c.scopeId === `channel:${channelId}`)?.isPrivate === true;
+}
+
+/**
+ * Reshapes a flat Slack list into the shape Slack itself has: the channel is the room, and
+ * the threads inside it are where the context lives. Five test threads in `#general` become
+ * one `#general` heading with five children instead of five near-identical sidebar rows.
+ *
+ * Built exactly like `groupProjectSessions`: the input is sorted newest-first once, a
+ * channel takes the list position of its newest thread, and children are appended in that
+ * same order — so channels sort by the most recent activity of any child, and children sort
+ * newest-first, with no second pass. DMs carry no channel and stay where they fall, so they
+ * interleave with the channel headings by recency exactly as they did when every Slack row
+ * was flat.
+ */
+export function groupSlackChannels(sessions: readonly CoreSession[]): SlackListItem[] {
+  const channels = new Map<string, Extract<SlackListItem, { kind: "channel" }>>();
+  const items: SlackListItem[] = [];
+  for (const session of [...sessions].sort((a, b) => activityOf(b) - activityOf(a))) {
+    const channelId = slackChannelIdOf(session.threadRef);
+    if (!channelId) {
+      items.push({ kind: "session", session });
+      continue;
+    }
+    let channel = channels.get(channelId);
+    if (!channel) {
+      channel = { kind: "channel", channelId, name: null, sessions: [] };
+      channels.set(channelId, channel);
+      items.push(channel);
+    }
+    channel.sessions.push(session);
+    // The newest thread that knows the channel's name wins; a thread mirrored before the
+    // name was resolved carries none, and the heading falls back to the bare id.
+    if (!channel.name) {
+      const name = session.channelName?.trim().replace(/^#/, "");
+      if (name) channel.name = name;
+    }
+  }
+  return items;
 }
 
 export function chatBrowseStatusMatches(

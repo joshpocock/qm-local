@@ -2,7 +2,8 @@ import { swallow, swallowAs } from "../util/errors.ts";
 import bolt from "@slack/bolt";
 import { WebClient } from "@slack/web-api";
 import { createDeduper, createThreadTracker } from "./lib.ts";
-import { registerSlackBotIdentity } from "./message-gating.ts";
+import { personaBotForId, registerSlackBotIdentity, type SlackPostClient } from "./message-gating.ts";
+import { personaIdFromIdentity } from "../delivery/persona-identity.ts";
 import { installDevIntrospection } from "./dev-introspection.ts";
 import { setDefaultBotIdentity, createSurfaceHeaderEnsurer, type SurfaceHeaderClient } from "./delivery.ts";
 import { NO_RETRY, type SlackPluginConfig, normalizeSlackApiUrl, slackPluginConfigFromEnv } from "./config.ts";
@@ -50,7 +51,22 @@ export async function startSlackPlugin(
     copilot: cfg.copilotBotToken,
   };
   const identityClients = new Map<string, WebClient>();
-  function clientForIdentity(identity: string): WebClient {
+  function clientForIdentity(identity: string): unknown {
+    // A panel reply names the persona that wrote it. Its bot is a SIBLING instance in this
+    // process, so the client comes from the shared directory rather than from a token of ours.
+    // If that instance has since stopped, the reply falls back to this (primary) client under
+    // the default identity — a reply posted by the wrong bot beats a reply nobody ever sees.
+    const personaId = personaIdFromIdentity(identity);
+    if (personaId) {
+      const bot = personaBotForId(personaId);
+      if (!bot?.postClient) {
+        console.error(
+          `[slack-plugin] persona ${personaId} has no running bot — posting its panel reply under the default identity`,
+        );
+        return app.client;
+      }
+      return bot.postClient;
+    }
     const token = IDENTITY_TOKENS[identity];
     if (!token) throw new Error(`no token for post identity "${identity}" (set its *_BOT_TOKEN env)`);
     let c = identityClients.get(identity);
@@ -136,7 +152,17 @@ export async function startSlackPlugin(
   });
   const approvals = createApprovals({ core, bridge, directory, threads });
   const ensureHeader = createSurfaceHeaderEnsurer({
-    headerFacts: (scope) => core.surfaceHeaderFacts(scope as Parameters<typeof core.surfaceHeaderFacts>[0]),
+    // A persona-bound bot's DM header names ITS persona and model — the scope's default
+    // runtime choice is what the DEFAULT bot runs, and announcing it here made the Codex
+    // bot's DM read "Using Claude Opus 5". Falls through to the scope facts whenever the
+    // persona cannot be resolved, which is also the entire default-bot path.
+    headerFacts: async (scope) => {
+      if (cfg.personaId) {
+        const p = await core.personaHeader(cfg.personaId).catch(() => undefined);
+        if (p) return { agentLabel: p.name, modelName: p.modelName };
+      }
+      return core.surfaceHeaderFacts(scope as Parameters<typeof core.surfaceHeaderFacts>[0]);
+    },
     webUiPublicUrl: cfg.webUiPublicUrl,
     ids,
   });
@@ -160,6 +186,7 @@ export async function startSlackPlugin(
     ...(TRUSTED_FILE_HOST ? { trustedFileHost: TRUSTED_FILE_HOST } : {}),
     ensureHeader,
     ...(cfg.personaId ? { personaId: cfg.personaId } : {}),
+    panelRounds: cfg.panelRounds ?? 1,
   });
   approvals.registerActions(app);
   registerSlackEvents(app, {
@@ -191,7 +218,15 @@ export async function startSlackPlugin(
     ? createDeliveryPoller({ core, bridge, mirror, threads, clientForIdentity })
     : undefined;
 
+  // The persona this bot answers as INSIDE A PANEL. A registry bot's `personaId` is also its
+  // every-turn persona and wins outright; a default bot's `panelPersonaId` is panel-only, and
+  // deliberately reaches neither the turn handler's solo path (`personaId` below) nor
+  // `headerFacts` above — both of which are keyed on `cfg.personaId` and stay exactly as they
+  // were for the default bot.
+  const panelPersonaId = cfg.personaId ?? cfg.panelPersonaId;
+
   let auth: any;
+  let personaName: string | undefined;
   try {
     auth = (await app.client.auth.test()) as any;
     ids.ownTeamId = auth.team_id ?? "";
@@ -210,6 +245,16 @@ export async function startSlackPlugin(
         );
       }
     }
+    if (panelPersonaId) {
+      // Resolved once, here, and published to the siblings below: the whole process then knows
+      // which `<@U…>` is which `@Name` without a core call per message.
+      personaName = await core.personaName(panelPersonaId).catch(swallowAs("slack: persona name lookup", undefined));
+      if (!personaName) {
+        console.warn(
+          `[slack-plugin] persona ${panelPersonaId} has no resolvable name — this bot cannot join a Slack room panel`,
+        );
+      }
+    }
     await app.start();
   } catch (err) {
     stopped = true;
@@ -219,10 +264,23 @@ export async function startSlackPlugin(
   }
   // Sibling qm bots must not answer each other: both hold stake in a shared thread, so an
   // unguarded exchange would ping-pong forever. Third-party bots are unaffected.
-  const unregisterIdentity = registerSlackBotIdentity({ botUserId: ids.botUserId, ownBotId: ids.ownBotId });
+  // The same record is the panel directory: `personaId`/`personaName` are what turns a Slack
+  // `<@U…>` into the driver's `@Name`, and `postClient` is how a sibling's reply gets posted
+  // under THIS bot's token.
+  const unregisterIdentity = registerSlackBotIdentity({
+    botUserId: ids.botUserId,
+    ownBotId: ids.ownBotId,
+    ...(panelPersonaId ? { personaId: panelPersonaId, alwaysPersona: !!cfg.personaId } : {}),
+    ...(personaName ? { personaName } : {}),
+    postClient: app.client as unknown as SlackPostClient,
+  });
   devIntrospection?.ready({ connectedAs: auth.user ?? "", botUserId: ids.botUserId, teamId: ids.ownTeamId });
   const instanceNote = cfg.instanceLabel ? ` [${cfg.instanceLabel}]` : "";
-  const personaNote = cfg.personaId ? `; speaking as persona ${cfg.personaId}` : "";
+  const personaNote = cfg.personaId
+    ? `; speaking as persona ${cfg.personaId}`
+    : panelPersonaId
+      ? `; speaking as persona ${panelPersonaId} in room panels only`
+      : "";
   console.log(
     `[slack-plugin]${instanceNote} connected as @${auth.user} (bot ${ids.botUserId}) in team ${auth.team} (${ids.ownTeamId}); in-process core${personaNote}`,
   );
