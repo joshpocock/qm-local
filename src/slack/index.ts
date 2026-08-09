@@ -238,7 +238,12 @@ export async function startSlackPlugin(
       return;
     }
     deliveriesPollInFlight = true;
-    void deliveries.pollDeliveries(app.client).finally(() => {
+    // `.finally()` re-throws, so without the catch a Slack-side failure here is an unhandled
+    // rejection rather than a logged one. Same shape as the context-request drain below.
+    void deliveries
+      .pollDeliveries(app.client)
+      .catch(swallowAs("slack: deliveries poll", undefined))
+      .finally(() => {
       deliveriesPollInFlight = false;
       if (deliveriesPollAgain) {
         deliveriesPollAgain = false;
@@ -255,7 +260,10 @@ export async function startSlackPlugin(
   const serviceContextRequest = (r: SurfaceContextRequest): void => {
     if (stopped || !r?.id || contextRequestsInFlight.has(r.id)) return;
     contextRequestsInFlight.add(r.id);
-    void surfaceContext.fulfillSurfaceContext(app.client, r).finally(() => contextRequestsInFlight.delete(r.id));
+    void surfaceContext
+      .fulfillSurfaceContext(app.client, r)
+      .catch(swallowAs("slack: surface context fulfil", undefined))
+      .finally(() => contextRequestsInFlight.delete(r.id));
   };
   const unsubscribeContextRequests = servicesQueues ? core.onContextRequest(serviceContextRequest) : undefined;
   if (servicesQueues) {

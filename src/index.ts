@@ -221,3 +221,29 @@ function shutdown(signal: string): void {
 }
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
+
+/**
+ * Node's default for an unhandled rejection is to kill the process, which is the wrong trade
+ * for this one: core is the whole platform â€” every agent turn, cron, session and deployment â€”
+ * and a surface plugin is one optional integration hanging off the side of it. A Slack app
+ * whose token was rotated in the Slack admin UI should cost the org Slack, not the platform.
+ *
+ * The concrete case this was written for: an expired bot or app token makes the Slack client
+ * reject twice, once on the path the reconciler awaits (handled, retried with backoff) and once
+ * from a promise inside the client that nothing is holding. The second one used to exit the
+ * process, so core crash-looped every 5 seconds against a credential only a human could fix,
+ * and took the web UI, the scheduler and every running agent down with it each time.
+ *
+ * Deliberately loud rather than silent: an unhandled rejection is still a bug, and this prints
+ * everything needed to find it. Surviving it is not the same as approving of it. A rejection
+ * inside a turn is already caught per-turn, so what reaches here is startup and background
+ * work, where "log it, keep serving, let the reconciler retry" is the honest response.
+ */
+process.on("unhandledRejection", (reason: unknown) => {
+  const detail = reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
+  const data = (reason as { data?: unknown } | null)?.data;
+  console.error(
+    `[qm] unhandled rejection (core kept running â€” this is a bug worth fixing):\n${detail}` +
+      (data ? `\ndetail: ${JSON.stringify(data)}` : ""),
+  );
+});
