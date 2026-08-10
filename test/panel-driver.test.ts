@@ -1249,7 +1249,7 @@ test("PUT /v1/sessions/:id/room validates the roster and round-trips through the
     });
 
     for (const [label, room] of [
-      ["too many agents", { personaIds: [scout.id, critic.id, scout.id, critic.id, scout.id], rounds: 1 }],
+      ["repeats inside a long roster", { personaIds: [scout.id, critic.id, scout.id, critic.id, scout.id], rounds: 1 }],
       ["no agents", { personaIds: [], rounds: 1 }],
       ["duplicate agents", { personaIds: [scout.id, scout.id], rounds: 1 }],
       ["zero rounds", { personaIds: [scout.id], rounds: 0 }],
@@ -1273,6 +1273,90 @@ test("PUT /v1/sessions/:id/room validates the roster and round-trips through the
     assert.equal((await built.sessions.get(session.id))!.room, undefined, "room: null clears the roster");
   } finally {
     await new Promise<void>((r) => server.close(() => r()));
+  }
+});
+
+/**
+ * Editing a room is a session mutation, so it carries the session's own authorization: the
+ * route refuses anything the principal cannot already see, and answers 404 rather than 403
+ * so a stranger cannot use the edit endpoint to probe which session ids exist.
+ */
+test("PUT /v1/sessions/:id/room refuses a principal who cannot see the session, and changes nothing", async () => {
+  const built = freshApp();
+  const server = createInsecureTestServer(built.app, { config: built.config, harnessId: "mock" });
+  server.listen(0);
+  const base = `http://localhost:${(server.address() as AddressInfo).port}`;
+  const threadRef = "web:U1:room-authz";
+  try {
+    const { session, personas } = await openRoom(built, threadRef, (ids) => ({ personaIds: ids, rounds: 1 }), [
+      "Scout",
+      "Critic",
+    ]);
+    const mine = (await built.sessions.get(session.id))!.room;
+
+    // `room: null` skips roster validation entirely and lands straight on the session lookup,
+    // which is the authorization this route has: a session the principal cannot see is a 404,
+    // so a stranger cannot even clear somebody else's roster.
+    const stranger = await fetch(`${base}/v1/sessions/${session.id}/room`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ principalId: "U2", room: null }),
+    });
+    assert.equal(stranger.status, 404, "a session the principal cannot see does not exist to them");
+    assert.deepEqual((await built.sessions.get(session.id))!.room, mine, "and its roster is untouched");
+
+    // A stranger sending a roster is refused earlier still: the agents are not theirs to use.
+    const strangerRoster = await fetch(`${base}/v1/sessions/${session.id}/room`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ principalId: "U2", room: { personaIds: [personas[0]!.id], rounds: 9 } }),
+    });
+    assert.equal(strangerRoster.status, 400);
+    assert.deepEqual((await built.sessions.get(session.id))!.room, mine);
+
+    const anonymous = await fetch(`${base}/v1/sessions/${session.id}/room`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ room: { personaIds: [personas[0]!.id], rounds: 2 } }),
+    });
+    assert.equal(anonymous.status, 400, "no principal at all is a bad request");
+    assert.deepEqual((await built.sessions.get(session.id))!.room, mine);
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+  }
+});
+
+/**
+ * What "edit a room" has to mean end to end: the next message runs the edited roster over the
+ * edited number of rounds, and everything already said stays exactly where it was — including
+ * the turns of an agent that has just been dropped from the roster.
+ */
+test("an edited roster and round count take effect on the next message, and the transcript keeps its history", async () => {
+  const built = freshApp();
+  const threadRef = "web:U1:room-edited";
+  const { session, personas } = await openRoom(built, threadRef, (ids) => ({ personaIds: ids, rounds: 1 }), [
+    "Scout",
+    "Critic",
+  ]);
+  const [scout, critic] = personas as [AgentPersona, AgentPersona];
+
+  await built.app.turn(webTurn(threadRef, "first pass"));
+  const afterFirst = await built.sessions.getEntries(session.id);
+  const criticSpoke = afterFirst.filter((e) => personaOf(e)?.id === critic.id);
+  assert.ok(criticSpoke.length > 0, "Critic answered while it was in the room");
+
+  // The edit an operator makes from the dialog: Critic out, two rounds instead of one.
+  await built.sessions.setRoom(session.id, { personaIds: [scout.id], rounds: 2 });
+
+  const result = await built.app.turn(webTurn(threadRef, "second pass"));
+  assert.notEqual(result.status, "refused", result.reason);
+  const added = (await built.sessions.getEntries(session.id)).filter((e) => e.seq > (afterFirst.at(-1)?.seq ?? -1));
+  const speakers = added.filter((e) => e.type === "assistant").map((e) => personaOf(e)?.id);
+
+  assert.deepEqual(speakers, [scout.id, scout.id], "the dropped agent stops speaking; the new budget is two rounds");
+  for (const entry of criticSpoke) {
+    const still = (await built.sessions.getEntries(session.id)).find((e) => e.seq === entry.seq);
+    assert.deepEqual(still, entry, "a removed agent's turns stay in the transcript, byline and all");
   }
 });
 

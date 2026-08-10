@@ -15,6 +15,7 @@ import {
   Check,
   ChevronRight,
   Copy,
+  EllipsisVertical,
   FileImage,
   FileText,
   Files,
@@ -91,6 +92,7 @@ import {
   sessionsState,
   sessionSlackUrl,
   sessionTitle,
+  startRoomEdit,
   surfaceOf,
 } from "./sessions";
 import { backgroundLabel, clearWorking, conversationBackground, markWorking } from "./session-list";
@@ -153,6 +155,20 @@ interface SettledRowKey {
 const settledRowCache = new WeakMap<object, SettledRowKey>();
 const connectedConnectors = new Set<string>();
 const redrawHooks = new Set<() => void>();
+
+/**
+ * Every pane with an open room-banner menu, so a click or an Escape that landed outside one
+ * can shut it. Module-level rather than per-surface because a split view holds several chat
+ * surfaces at once and only the document sees a click that missed all of them — the same
+ * shape `closeDeployMenu` and `closeOpenSessionMenu` take.
+ */
+const roomMenuClosers = new Set<() => void>();
+
+export function closeRoomBannerMenu(target?: Element | null): boolean {
+  if (!roomMenuClosers.size || target?.closest(".room-banner-menu")) return false;
+  for (const close of [...roomMenuClosers]) close();
+  return true;
+}
 let proactiveOpenerStarted = false;
 
 export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -218,6 +234,20 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
   let threadsSeenLive = false;
   /** Whether the last draw had a reply in flight, so a new one can start expanded. */
   let liveThreadDrawn = false;
+  /** Whether this pane's room banner has its options menu open. One pane, one menu. */
+  let roomMenuOpen = false;
+
+  function closeRoomMenu(): void {
+    setRoomMenuOpen(false);
+  }
+
+  function setRoomMenuOpen(open: boolean): void {
+    if (roomMenuOpen === open) return;
+    roomMenuOpen = open;
+    if (open) roomMenuClosers.add(closeRoomMenu);
+    else roomMenuClosers.delete(closeRoomMenu);
+    if (chatState.agent) drawActiveChat();
+  }
 
   function notePendingSessionOnSend(): void {
     if (!chatState.threadRef || chatState.sessionId !== null) return;
@@ -250,6 +280,8 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     chatState.transcriptAnchorSeq = null;
     chatState.earlierCount = 0;
     chatState.loadingEarlier = false;
+    roomMenuOpen = false;
+    roomMenuClosers.delete(closeRoomMenu);
     resetThreadFolds();
   }
 
@@ -518,6 +550,7 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
 
   function dispose(): void {
     redrawHooks.delete(redrawForConnector);
+    roomMenuClosers.delete(closeRoomMenu);
     teardownActiveChat();
   }
 
@@ -1097,7 +1130,50 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     const name = row ? sessionTitle(row) : defaultRoomNameFor(room);
     return html`<div class="room-banner">
       <div class="room-banner-name">${icon(Users, 13)}<span>${name}</span></div>
-      ${roomRosterChips(room)}
+      ${roomRosterChips(room)}${roomBannerMenu(row)}
+    </div>`;
+  }
+
+  /**
+   * The room's own kebab, in the one header a live room has. Needs a saved session: the
+   * roster is edited by a PUT against a session id, and a room whose first message has not
+   * landed yet does not have one — it is still holding its roster client-side, and the
+   * dialog that picked it was open moments ago.
+   */
+  function roomBannerMenu(row: CoreSession | undefined): TemplateResult | typeof nothing {
+    if (!row?.id) return nothing;
+    return html`<div class="session-menu room-banner-menu ${roomMenuOpen ? "menu-open" : ""}">
+      <button
+        class="session-menu-btn"
+        type="button"
+        title="Room options"
+        aria-label=${`Options for ${sessionTitle(row)}`}
+        aria-haspopup="menu"
+        aria-expanded=${roomMenuOpen ? "true" : "false"}
+        @click=${(event: Event) => {
+          event.stopPropagation();
+          setRoomMenuOpen(!roomMenuOpen);
+        }}
+      >
+        ${icon(EllipsisVertical, 16)}
+      </button>
+      ${
+        roomMenuOpen
+          ? html`<div class="session-menu-popover" role="menu" @click=${(event: Event) => event.stopPropagation()}>
+              <button
+                class="session-menu-option"
+                type="button"
+                role="menuitem"
+                @click=${() => {
+                  setRoomMenuOpen(false);
+                  startRoomEdit(row);
+                }}
+              >
+                ${icon(Pencil, 15)}<span>Edit room</span>
+              </button>
+            </div>`
+          : nothing
+      }
     </div>`;
   }
 

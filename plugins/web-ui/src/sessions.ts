@@ -26,7 +26,7 @@ import {
   X,
 } from "lucide";
 import { defaultRoomNameFor, noteRoom, type RoomConfig } from "./room-state";
-import { ensureRoomPersonas, roomRosterDots } from "./rooms";
+import { ensureRoomPersonas, openEditRoomDialog, roomRosterDots } from "./rooms";
 import {
   api,
   attachPendingApprovals,
@@ -39,6 +39,7 @@ import {
   TAIL_TURNS,
   type TranscriptPage,
   updateSession,
+  updateSessionRoom,
   type PendingApproval,
   type CoreProject,
   type CoreSession,
@@ -1127,6 +1128,18 @@ function sessionMenuPopover(s: CoreSession): TemplateResult {
         ${icon(Pencil, 15)}<span>Rename</span>
       </button>
       ${
+        isRoomSession(s)
+          ? html`<button
+              class="session-menu-option session-menu-edit-room"
+              type="button"
+              role="menuitem"
+              @click=${() => startRoomEdit(s)}
+            >
+              ${icon(Users, 15)}<span>Edit room</span>
+            </button>`
+          : nothing
+      }
+      ${
         autoTitleable(s)
           ? html`<button
               class="session-menu-option"
@@ -1302,6 +1315,46 @@ function setArchived(s: CoreSession, archived: boolean): void {
 function setPinned(s: CoreSession, pinned: boolean): void {
   sessionsState.openMenuId = null;
   void persistSessionPatch(s.id, { pinned });
+}
+
+/**
+ * Edits a room that already exists, from the very dialog that created it — pre-filled with
+ * the room's own name, roster and round count.
+ *
+ * Persisting is the whole job: core re-reads the session's stored `room` on every dispatch
+ * (see the panel branch in app-turn.ts), so a saved change simply takes effect on the next
+ * message sent into the room. Nothing already said moves — an agent dropped from the roster
+ * keeps every turn it took, it just stops being asked for new ones.
+ */
+export function startRoomEdit(s: CoreSession): void {
+  sessionsState.openMenuId = null;
+  renderList();
+  const room = s.room;
+  if (!room?.personaIds.length || !s.id) return;
+  openEditRoomDialog({ name: (s.title ?? "").trim(), personaIds: room.personaIds, rounds: room.rounds }, (config, name) =>
+    void saveRoomEdit(s, config, name),
+  );
+}
+
+async function saveRoomEdit(s: CoreSession, config: RoomConfig, name: string): Promise<void> {
+  try {
+    const { session } = await updateSessionRoom(s.id, config);
+    applyResolvedSession(session);
+  } catch (e) {
+    await refreshSessions({ silent: true });
+    sessionsNotice = errMessage(e, "Failed to save the room.");
+    renderList();
+    return;
+  }
+  // The mounted thread reads its roster from here, not from the session list, so the header
+  // and the composer would keep drawing the old one until a reload without this.
+  noteRoom(s.threadRef ?? null, config);
+  renderList();
+  // Same rule rename commits under: a name matching what the roster derives is not a title
+  // worth storing, so an unnamed room stays unnamed and keeps tracking its members.
+  const desired = !name || name === defaultRoomNameFor(config) ? null : name;
+  if (desired !== ((s.title ?? "").trim() || null)) await persistSessionPatch(s.id, { title: desired });
+  for (const conv of allConversations()) if (conv.state.threadRef === s.threadRef) conv.redraw();
 }
 
 function previewColor(s: CoreSession, color: string): void {

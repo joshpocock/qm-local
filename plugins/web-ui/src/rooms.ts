@@ -16,6 +16,7 @@ import { fieldSelect, icon } from "./ui";
 import { AGENT_ROOMS_DISABLED_COPY, type AgentItem } from "./agent-registry";
 import {
   cachePersonas,
+  cachedPersona,
   MAX_ROOM_ROUNDS,
   clearPendingRoom,
   clearPendingRoomName,
@@ -168,8 +169,17 @@ export function ensureRoomPersonas(): Promise<void> {
 /** Sentinel option value: the picker switches to a free number input. */
 const CUSTOM_ROUNDS = "custom";
 
+/**
+ * The dialog serves both "New room" and "Edit room". Same fields, same validation, same
+ * submit path — only the copy and the starting values differ, because an operator changing
+ * a room's roster or its round budget is making exactly the choice they made when they
+ * created it, and a second dialog would be a second set of rules to keep in step.
+ */
+type RoomDialogMode = "create" | "edit";
+
 interface RoomDialogState {
   open: boolean;
+  mode: RoomDialogMode;
   loading: boolean;
   agents: AgentItem[];
   name: string;
@@ -183,6 +193,7 @@ interface RoomDialogState {
 
 const dialogState: RoomDialogState = {
   open: false,
+  mode: "create",
   loading: false,
   agents: [],
   name: "",
@@ -221,7 +232,9 @@ function closeRoomDialog(): void {
  * already in hand here, and the cache may not be warm on a first-ever room.
  */
 function derivedRoomName(personaIds: readonly string[]): string {
-  return defaultRoomName(personaIds.map((id) => dialogState.agents.find((a) => a.id === id)?.name || id));
+  return defaultRoomName(
+    personaIds.map((id) => dialogState.agents.find((a) => a.id === id)?.name || cachedPersona(id)?.name || id),
+  );
 }
 
 function roomNameFromDialog(personaIds: readonly string[]): string {
@@ -244,9 +257,16 @@ function submitRoom(): void {
 
 function agentRosterRow(agent: AgentItem): TemplateResult {
   const selected = dialogState.personaIds.includes(agent.id);
-  const disabled = !agent.enabled;
+  // A disabled agent cannot be added, but one a room already holds must still be removable:
+  // core refuses a roster containing it, so leaving the row inert would wedge the edit with
+  // no way out but re-enabling an agent the operator may well be trying to drop.
+  const disabled = !agent.enabled && !selected;
   let hint = `${agent.harnessId} · ${agent.modelId}`;
-  if (!agent.enabled) hint = "Disabled — enable it on the Agents page to use it in a room";
+  if (!agent.enabled) {
+    hint = selected
+      ? "Disabled — remove it from the room, or re-enable it on the Agents page"
+      : "Disabled — enable it on the Agents page to use it in a room";
+  }
   return html`<button
     class="room-pick ${selected ? "selected" : ""}"
     type="button"
@@ -270,14 +290,46 @@ function agentRosterRow(agent: AgentItem): TemplateResult {
   </button>`;
 }
 
+/**
+ * A member the agent list does not contain — an archived persona, or one that left the
+ * viewer's scope. It still speaks in the room, so it has to be visible and removable here;
+ * dropping it silently because `/api/agents` no longer mentions it would rewrite the roster
+ * behind the operator's back the first time they touched any other field.
+ */
+function missingRosterRow(id: string): TemplateResult {
+  const chip = personaChipFor({ id, name: "" }) ?? { id, name: id };
+  return html`<button
+    class="room-pick selected"
+    type="button"
+    role="checkbox"
+    aria-checked="true"
+    title="No longer available — it stays in the room until you remove it"
+    @click=${() => {
+      dialogState.personaIds = toggleRosterMember(dialogState.personaIds, id);
+      dialogState.error = "";
+      drawRoomDialog();
+    }}
+  >
+    <span class="room-pick-box" aria-hidden="true">✓</span>
+    ${personaDot(chip)}
+    <span class="room-pick-copy">
+      <span class="room-pick-name">@${chip.name}</span>
+      <span class="room-pick-meta">No longer available — remove it to drop it from the room</span>
+    </span>
+    <span class="badge">Unavailable</span>
+  </button>`;
+}
+
 function rosterBody(): TemplateResult {
   if (dialogState.roomsDisabled) return html`<p class="room-empty">${AGENT_ROOMS_DISABLED_COPY}</p>`;
   if (dialogState.loading && !dialogState.agents.length) return html`<p class="room-empty">Loading agents…</p>`;
-  if (!dialogState.agents.length) {
+  const known = new Set(dialogState.agents.map((agent) => agent.id));
+  const missing = dialogState.personaIds.filter((id) => !known.has(id));
+  if (!dialogState.agents.length && !missing.length) {
     return html`<p class="room-empty">No agents yet. Create one on the Agents page, then start a room.</p>`;
   }
   return html`<div class="room-pick-list" role="group" aria-label="Agents in this room">
-      ${dialogState.agents.map(agentRosterRow)}
+      ${missing.map(missingRosterRow)}${dialogState.agents.map(agentRosterRow)}
     </div>
     ${
       dialogState.personaIds.length
@@ -288,6 +340,7 @@ function rosterBody(): TemplateResult {
 
 function roomDialogTpl(): TemplateResult {
   const ready = !dialogState.roomsDisabled && dialogState.personaIds.length > 0;
+  const editing = dialogState.mode === "edit";
   return html`
     <dialog
       class="project-dialog room-dialog"
@@ -304,11 +357,11 @@ function roomDialogTpl(): TemplateResult {
       >
         <div class="project-dialog-head">
           <span class="context-glyph large">${icon(Users, 21)}</span>
-          <div><h2 id="room-dialog-title">New room</h2></div>
+          <div><h2 id="room-dialog-title">${editing ? "Edit room" : "New room"}</h2></div>
           <button
             class="project-icon-button"
             type="button"
-            aria-label="Close new room"
+            aria-label=${editing ? "Close edit room" : "Close new room"}
             title="Close"
             data-dialog-cancel
             @click=${closeRoomDialog}
@@ -317,8 +370,14 @@ function roomDialogTpl(): TemplateResult {
           </button>
         </div>
         <p class="room-dialog-lead">
-          Name the room and pick your agents. Each takes a turn in roster order when you send a message, and can
-          @mention another agent to hand it a follow-up turn.
+          ${
+            editing
+              ? html`Rename the room, add or drop agents, and change how many rounds it runs. Changes take effect on
+                the next message you send — everything already said stays in the transcript, including turns from an
+                agent you remove.`
+              : html`Name the room and pick your agents. Each takes a turn in roster order when you send a message, and
+                can @mention another agent to hand it a follow-up turn.`
+          }
         </p>
         <label class="project-name-field room-name-field" for="room-name">
           <span>Name</span>
@@ -383,7 +442,7 @@ function roomDialogTpl(): TemplateResult {
         <div class="project-dialog-actions">
           <button class="btn" type="button" @click=${closeRoomDialog}>Cancel</button>
           <button class="btn primary" type="submit" ?disabled=${!ready}>
-            ${icon(Users, 15)}<span>Start room</span>
+            ${icon(Users, 15)}<span>${editing ? "Save room" : "Start room"}</span>
           </button>
         </div>
       </form>
@@ -415,17 +474,46 @@ async function loadRoomAgents(): Promise<void> {
   }
 }
 
+/** What an "Edit room" opener pre-fills the dialog with. Omitted fields start as a new room's. */
+export interface RoomDialogPrefill {
+  name?: string;
+  personaIds?: readonly string[];
+  rounds?: number;
+}
+
 /**
  * Opens the roster picker. `onCreate` receives the chosen config once it validates, plus
  * the room's name — the typed one, or the roster-derived default when the field was left
  * blank. It is never empty, so callers never have to derive a name themselves.
  */
 export function openRoomDialog(onCreate: (config: RoomConfig, name: string) => void): void {
+  openDialog("create", onCreate, {});
+}
+
+/**
+ * The same dialog, opened over a room that already exists. `onSave` is handed the edited
+ * config and name exactly as `onCreate` is — the caller owns the PUT, which keeps this
+ * module free of the session store the way the create path already keeps it free of the
+ * conversation one.
+ */
+export function openEditRoomDialog(
+  prefill: RoomDialogPrefill,
+  onSave: (config: RoomConfig, name: string) => void,
+): void {
+  openDialog("edit", onSave, prefill);
+}
+
+function openDialog(
+  mode: RoomDialogMode,
+  onCreate: (config: RoomConfig, name: string) => void,
+  prefill: RoomDialogPrefill,
+): void {
   dialogState.opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   dialogState.open = true;
-  dialogState.name = "";
-  dialogState.personaIds = [];
-  dialogState.rounds = DEFAULT_ROOM_ROUNDS;
+  dialogState.mode = mode;
+  dialogState.name = prefill.name ?? "";
+  dialogState.personaIds = [...(prefill.personaIds ?? [])];
+  dialogState.rounds = prefill.rounds ?? DEFAULT_ROOM_ROUNDS;
   dialogState.error = "";
   dialogState.onCreate = onCreate;
   drawRoomDialog();

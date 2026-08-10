@@ -185,9 +185,11 @@ test("an unusable roster is rejected at the relay instead of reaching core", asy
   for (const room of [
     undefined,
     { personaIds: [], rounds: 1 },
-    { personaIds: ["a", "b", "c", "d", "e"], rounds: 1 },
     { personaIds: ["a", "a"], rounds: 1 },
-    { personaIds: ["a"], rounds: 4 },
+    { personaIds: ["a", 7], rounds: 1 },
+    { personaIds: ["a"], rounds: 0 },
+    { personaIds: ["a"], rounds: 21 },
+    { personaIds: ["a"], rounds: 2.5 },
     { personaIds: ["a"], rounds: "2" },
     "roster",
   ]) {
@@ -200,6 +202,36 @@ test("an unusable roster is rejected at the relay instead of reaching core", asy
     assert.equal(r.status, 400, `rejected: ${JSON.stringify(room)}`);
     assert.equal(since(before, "/v1/sessions/s1/room"), undefined, "nothing reaches core");
   }
+});
+
+/**
+ * The relay's job is to keep junk off the wire, not to be a second, stricter rulebook: core
+ * caps `rounds` at ROOM_MAX_ROUNDS (20) and puts no cap at all on roster size, and an edit
+ * that core would accept must not die here. The dialog's "Custom…" rounds field reaches 20,
+ * and `@tag`-ing agents into a room grows a roster past any small number.
+ */
+test("the relay's roster rules are core's: no size cap, rounds up to 20", async () => {
+  for (const room of [
+    { personaIds: ["a", "b", "c", "d", "e", "f"], rounds: 1 },
+    { personaIds: ["a"], rounds: 7 },
+    { personaIds: ["a"], rounds: 20 },
+  ]) {
+    const before = calls.length;
+    const r = await fetch(`${base}/api/sessions/s1/room`, { method: "PUT", headers, body: JSON.stringify({ room }) });
+    assert.equal(r.status, 200, `accepted: ${JSON.stringify(room)}`);
+    assert.deepEqual(since(before, "/v1/sessions/s1/room")?.body, { principalId: "alice", room });
+  }
+});
+
+/** The signed-in principal is the one core sees — a body cannot edit somebody else's room. */
+test("a room edit always relays the signed-in principal, never the body's", async () => {
+  const before = calls.length;
+  await fetch(`${base}/api/sessions/s1/room`, {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({ room: { personaIds: ["ap_1"], rounds: 3 }, principalId: "mallory" }),
+  });
+  assert.equal(since(before, "/v1/sessions/s1/room")?.body.principalId, "alice");
 });
 
 test("the first message of a new room carries its roster through to core's turn", async () => {
@@ -231,7 +263,7 @@ test("an ordinary turn carries no room key at all", async () => {
 });
 
 test("a malformed roster on a turn is rejected at the relay instead of reaching core", async () => {
-  for (const room of [null, { personaIds: [], rounds: 1 }, { personaIds: ["a"], rounds: 9 }, "roster"]) {
+  for (const room of [null, { personaIds: [], rounds: 1 }, { personaIds: ["a"], rounds: 99 }, "roster"]) {
     const before = calls.length;
     const r = await fetch(`${base}/api/turn`, {
       method: "POST",

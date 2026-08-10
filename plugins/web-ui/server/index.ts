@@ -189,12 +189,19 @@ function agentDraftFromBody(body: Record<string, unknown>, create: boolean): Rec
   return draft;
 }
 
-const ROOM_MAX_PERSONAS = 4;
+/**
+ * Mirrors `ROOM_MAX_ROUNDS` in src/types.ts. Deliberately a copy rather than an import: the
+ * surface process talks to core over HTTP only and shares no runtime module with it. Core
+ * validates every room again, so a drift here can only be stricter than the real rule — and
+ * the room dialog's "Custom…" rounds field goes all the way to this ceiling.
+ */
+const ROOM_MAX_ROUNDS = 20;
 
 /**
  * Normalises a room roster. Returns `null` to clear the room, a config to set it, or
  * `undefined` when the body is neither (the route answers 400). Core validates again —
- * this only keeps obvious junk off the wire.
+ * this only keeps obvious junk off the wire. There is no roster size cap, matching
+ * `RoomConfig` ("a room may hold as many as you like").
  */
 function roomFromBody(body: { room?: unknown }): { personaIds: string[]; rounds: number } | null | undefined {
   if (body.room === null) return null;
@@ -202,10 +209,12 @@ function roomFromBody(body: { room?: unknown }): { personaIds: string[]; rounds:
   const room = body.room as { personaIds?: unknown; rounds?: unknown };
   if (!Array.isArray(room.personaIds)) return undefined;
   const personaIds = room.personaIds.filter((id): id is string => typeof id === "string" && id.length > 0);
-  if (!personaIds.length || personaIds.length > ROOM_MAX_PERSONAS) return undefined;
+  if (!personaIds.length || personaIds.length !== room.personaIds.length) return undefined;
   if (new Set(personaIds).size !== personaIds.length) return undefined;
   const rounds = room.rounds;
-  if (rounds !== 1 && rounds !== 2 && rounds !== 3) return undefined;
+  if (typeof rounds !== "number" || !Number.isInteger(rounds) || rounds < 1 || rounds > ROOM_MAX_ROUNDS) {
+    return undefined;
+  }
   return { personaIds, rounds };
 }
 
@@ -1633,7 +1642,7 @@ const routeRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (badRoom) {
         return json(res, 400, {
           error: "bad_request",
-          message: `room must be a roster of 1-${ROOM_MAX_PERSONAS} unique agents over 1-3 rounds`,
+          message: `room must be a roster of one or more unique agents over 1-${ROOM_MAX_ROUNDS} rounds`,
         });
       }
       if (!text.trim() && attachments.length === 0 && !approval && !proactiveOpener)

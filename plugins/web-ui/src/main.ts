@@ -5,6 +5,7 @@ import { closeFormMenus } from "./ui";
 import { allConversations } from "./conversations";
 import { closeOpenSessionMenu, renderList, sessionsState } from "./sessions";
 import { closeDeployMenu } from "./deploys";
+import { closeRoomBannerMenu } from "./chat";
 import { closeMentionPopover } from "./mention-markdown";
 
 function closeComposerMenus(keepOpenWithin: Element | null): boolean {
@@ -28,6 +29,7 @@ document.addEventListener("click", (e) => {
     renderList();
   }
   closeDeployMenu(target);
+  closeRoomBannerMenu(target);
   // The chip's own delegated handler runs first and has already opened or toggled it; this
   // only has to catch a click that landed somewhere else entirely.
   closeMentionPopover(target);
@@ -38,6 +40,7 @@ document.addEventListener("keydown", (e) => {
   closeComposerMenus(null);
   closeOpenSessionMenu();
   closeDeployMenu(null, true);
+  closeRoomBannerMenu(null);
   closeFormMenus();
   closeMentionPopover(null, true);
 });

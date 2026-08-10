@@ -7696,6 +7696,31 @@ h3.ambient-field-label {
 .room-banner ~ .context-banner {
   top: 52px;
 }
+/* The banner is a pill, not a list row: the kebab sits in flow at its trailing edge and is
+   always legible, since there is no row hover to reveal it. */
+.room-banner-menu.session-menu {
+  position: relative;
+  top: auto;
+  right: auto;
+  flex: 0 0 auto;
+  margin-top: 0;
+  margin-right: -6px;
+}
+.room-banner-menu .session-menu-btn {
+  width: 22px;
+  height: 22px;
+  opacity: 0.6;
+}
+.room-banner-menu .session-menu-btn:hover,
+.room-banner-menu .session-menu-btn:focus-visible,
+.room-banner-menu.menu-open .session-menu-btn {
+  opacity: 1;
+  background: color-mix(in srgb, var(--foreground) 9%, transparent);
+  color: var(--foreground);
+}
+.room-banner-menu .session-menu-popover {
+  top: calc(100% + 6px);
+}
 
 .room-dialog {
   width: min(480px, 100%);
