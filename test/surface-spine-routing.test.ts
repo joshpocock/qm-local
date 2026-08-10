@@ -566,7 +566,12 @@ test("post with an explicit ts to the current channel targets exactly <channel>:
   }
 });
 
-test("reach to a named channel resolves it, posts at that channel's top level, and echoes the match", async () => {
+test("reach to the channel the conversation lives in routes back into the conversation, thread included", async () => {
+  // This used to assert the opposite: same-channel reach posted at the channel's top
+  // level. That contract is how a mid-debate panel reply escaped its thread and landed
+  // in the channel (the persona said "reach my own channel", the resolver stripped the
+  // thread). Top-level posting has an explicit mechanism (`post` with broadcast:true,
+  // covered above); "reach where I already am" now means the current conversation.
   const built = freshApp();
   built.runtime.start();
   try {
@@ -590,7 +595,11 @@ test("reach to a named channel resolves it, posts at that channel's top level, a
     assert.equal(res.status, "queued");
     const posted = await pollFor(built.deliveries, (d) => d.text === "elsewhere");
     assert.ok(posted, "the reach post landed");
-    assert.equal(posted.destination.target, channel, "reach to a channel posts at its top level (bare container)");
+    assert.equal(
+      posted.destination.target,
+      `${channel}:${root}`,
+      "reach to the current channel stays in the current thread",
+    );
   } finally {
     await built.runtime.stop();
   }

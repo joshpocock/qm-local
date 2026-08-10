@@ -114,7 +114,13 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
       (target.channel === conversation.channelRef ||
         target.channel.replace(/^#/, "").toLowerCase() === conversation.channelName?.toLowerCase())
     ) {
-      return { ok: true, destination: { ...currentDestination, target: conversation.channelRef } };
+      // "Reach the channel I am already in" means THIS conversation — thread included.
+      // Substituting the bare channelRef here silently promoted the message to a
+      // top-level channel post whenever the conversation was a thread, which is how a
+      // mid-debate panel reply escaped its thread and landed in the channel. An agent
+      // that genuinely wants to address a DIFFERENT place can still reach any other
+      // channel; the one it is standing in routes back to where it is standing.
+      return { ok: true, destination: currentDestination };
     }
     if (!deps.directory)
       return { ok: false, message: "I can't reach a named channel or teammate from here — no directory is available." };
