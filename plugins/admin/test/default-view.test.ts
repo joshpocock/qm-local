@@ -46,18 +46,32 @@ test("the default Slack bot's debate agent is picked from the live agent list an
   assert.doesNotMatch(html, /const SLACK_PANEL_AGENTS = \[/);
 });
 
-test("debate rounds are an admin setting on the same card, bounded, clearable, and self-describing", () => {
-  assert.match(html, /id="slack-installation-panel-rounds"/);
-  assert.match(html, /Debate rounds/);
+test("the org debate-rounds default is a governance autonomy control, bounded and clearable", () => {
+  // A standing limit on how much agents do on their own belongs beside the security posture, not
+  // in the temporary onboarding guide — and there is exactly ONE editor for the value.
+  const autonomy = html.slice(html.indexOf('id="governance-autonomy"'), html.indexOf('id="governance-boundaries"'));
+  assert.match(autonomy, /id="card-panel-rounds"/);
+  assert.match(autonomy, /<h2>Debate rounds<\/h2>/);
+  assert.match(autonomy, /id="slack-installation-panel-rounds"/);
+  assert.match(autonomy, /id="card-security-posture"/);
+  const slackCard = html.slice(html.indexOf('id="card-slack-installation"'), html.indexOf('id="card-slack-bots"'));
+  assert.doesNotMatch(slackCard, /slack-installation-panel-rounds/);
+  assert.equal(html.match(/id="slack-installation-panel-rounds"/g)?.length, 1);
   // Bounded by the input itself and again before the request goes out.
   assert.match(html, /min="1"\s+max="20"/);
   assert.match(html, /!Number\.isInteger\(panelRounds\) \|\| panelRounds < 1 \|\| panelRounds > 20/);
   // Blank = unset = fall back to the deployment env var, then 1.
   assert.match(html, /const panelRounds = roundsRaw \? Number\(roundsRaw\) : null;/);
-  assert.match(html, /panelRounds,/);
-  assert.match(html, /typeof r\.data\.panelRounds === "number"/);
-  // The hint states the ceiling formula and the early exit, so the number is a budget an
-  // operator can reason about rather than a mystery knob.
+  // Same read and same write as before the move: the Slack installation record.
+  assert.match(html, /api\("PUT", "\/api\/slack-installation", \{ panelRounds \}\)/);
+  assert.match(html, /typeof data\?\.panelRounds === "number"/);
+  assert.match(html, /const showPanelRounds = scope\.startsWith\("org:"\);/);
+  // Status and error reporting follow the neighbouring governance cards.
+  assert.match(html, /id="st-panel-rounds"/);
+  // The copy states the scope, the override direction, the ceiling formula, and the early exit,
+  // so the number is a budget an operator can reason about rather than a mystery knob.
+  assert.match(html, /A channel can override this from the web UI/);
+  assert.match(html, /can only go lower, never higher/);
   assert.match(html, /agents × rounds × 2 messages/);
   assert.match(html, /passes ends it early/);
   assert.match(html, /Leave blank to use the deployment default/);
@@ -195,6 +209,7 @@ test("governance presents a scoped effective-state control plane", () => {
 test("governance renders simple settings as compact rows with contextual actions", () => {
   for (const id of [
     "card-security-posture",
+    "card-panel-rounds",
     "card-external-slack",
     "card-base-model",
     "card-people-directory",

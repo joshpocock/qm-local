@@ -4047,6 +4047,39 @@
                     ><span class="status" id="st-security-posture"></span>
                   </div>
                 </section>
+                <section class="card setting-row hidden" id="card-panel-rounds">
+                  <div class="head">
+                    <h2>Debate rounds</h2>
+                    <p>
+                      Org-wide. The default number of back-and-forth rounds a multi-agent debate gets in Slack, when a
+                      channel has not set its own. A channel can override this from the web UI; a count stated in a
+                      message can only go lower, never higher.
+                    </p>
+                    <p>
+                      A round is one pass over the agents mentioned. A debate posts at most agents × rounds × 2 messages
+                      (each agent can be granted one bonus turn per round by being mentioned), and a round in which
+                      every agent passes ends it early. Leave blank to use the deployment default. Takes effect within
+                      seconds, including in threads that already held a debate. It is stored on the Slack installation
+                      record, so the default Slack bot's tokens have to be saved before this can be set.
+                    </p>
+                  </div>
+                  <div class="body">
+                    <label for="slack-installation-panel-rounds">Rounds</label>
+                    <input
+                      type="number"
+                      id="slack-installation-panel-rounds"
+                      min="1"
+                      max="20"
+                      step="1"
+                      style="max-width: 160px"
+                      placeholder="Deployment default"
+                    />
+                  </div>
+                  <div class="foot">
+                    <button class="primary" id="panel-rounds-save">Apply</button
+                    ><span class="status" id="st-panel-rounds"></span>
+                  </div>
+                </section>
                 <section class="card setting-row hidden" id="card-approval-grant-modes">
                   <div class="head">
                     <h2>Approval grant options</h2>
@@ -4809,23 +4842,6 @@
                   <select id="slack-installation-panel-persona" style="width: 100%">
                     <option value="">Default org agent</option>
                   </select></label>
-                <label style="display: block; margin-bottom: 8px"
-                  >Debate rounds
-                  <input
-                    type="number"
-                    id="slack-installation-panel-rounds"
-                    min="1"
-                    max="20"
-                    step="1"
-                    placeholder="Deployment default"
-                    style="width: 100%"
-                /></label>
-                <p class="field-hint">
-                  A round is one pass over the agents mentioned. A debate posts at most agents × rounds × 2 messages
-                  (each agent can be granted one bonus turn per round by being mentioned), and a round in which every
-                  agent passes ends it early. Leave blank to use the deployment default. Takes effect within seconds,
-                  including in threads that already held a debate.
-                </p>
                 <p class="field-hint">
                   Use an app-level token with <code>connections:write</code>. Saving activates or reloads the Slack
                   surface within a few seconds.
@@ -4833,7 +4849,8 @@
                 <p class="field-hint">
                   The debate agent applies only when this bot is mentioned alongside another agent bot: on its own it
                   keeps answering as the default org agent, on the runtime model chosen for the scope. Leave the tokens
-                  blank to change just the debate settings.
+                  blank to change just the debate agent. The org default for debate ROUNDS is a standing limit on agent
+                  autonomy, so it lives in Governance › Autonomy rather than here.
                 </p>
               </div>
               <div class="foot">
@@ -6415,6 +6432,11 @@
         const showSecurityPosture = "securityPosture" in (r.data || {});
         $("card-security-posture").classList.toggle("hidden", !showSecurityPosture);
         if (showSecurityPosture) $("security-posture").value = r.data.securityPosture || "auto";
+        // The debate-rounds default is org-wide and lives on the Slack installation record, so it
+        // comes from that existing admin read rather than the scope document.
+        const showPanelRounds = scope.startsWith("org:");
+        $("card-panel-rounds").classList.toggle("hidden", !showPanelRounds);
+        if (showPanelRounds) loadPanelRounds(requestId);
         const showGrantModes = "approvalGrantModes" in (r.data || {});
         $("card-approval-grant-modes").classList.toggle("hidden", !showGrantModes);
         if (showGrantModes) {
@@ -7498,9 +7520,7 @@
         }
         slackInstallationConfigured = Boolean(r.data.configured);
         setSlackPanelPersona(r.data.panelPersonaId || "");
-        // Blank means "no admin choice" — the deployment's QM_SLACK_PANEL_ROUNDS, then 1.
-        $("slack-installation-panel-rounds").value =
-          typeof r.data.panelRounds === "number" ? String(r.data.panelRounds) : "";
+        applyPanelRounds(r.data);
         if (r.data.createUrl) $("slack-installation-create").href = r.data.createUrl;
         $("slack-installation-state").textContent =
           r.data.source === "environment"
@@ -7520,14 +7540,6 @@
         const botToken = $("slack-bot-token").value.trim();
         const appToken = $("slack-app-token").value.trim();
         const panelPersonaId = $("slack-installation-panel-persona").value.trim();
-        const roundsRaw = $("slack-installation-panel-rounds").value.trim();
-        // Blank clears the setting back to the deployment default; anything else must be a whole
-        // number in range, checked here so a typo never costs a round trip.
-        const panelRounds = roundsRaw ? Number(roundsRaw) : null;
-        if (roundsRaw && (!Number.isInteger(panelRounds) || panelRounds < 1 || panelRounds > 20)) {
-          setStatus("st-slack-installation", "Debate rounds must be a whole number from 1 to 20.", "err");
-          return;
-        }
         // Tokens are write-only and never shown again, so changing the debate settings alone must
         // not demand them back. Both blank means "just the debate settings".
         const agentOnly = !botToken && !appToken;
@@ -7544,7 +7556,6 @@
         const r = await api("PUT", "/api/slack-installation", {
           ...(agentOnly ? {} : { botToken, appToken }),
           panelPersonaId: panelPersonaId || null,
-          panelRounds,
         });
         $("slack-installation-save").disabled = false;
         if (!r.ok) {
@@ -7565,6 +7576,48 @@
         }
         await loadSlackInstallation();
         setStatus("st-slack-installation", "Removed", "ok");
+      };
+
+      // The org default for debate rounds is stored on the same Slack installation record, but it
+      // is edited in Governance › Autonomy next to the security posture: it is a standing limit on
+      // how much agents do on their own, not a connect-this-thing setup step. Both readers share
+      // one field and one endpoint so there is never a second editor for one value.
+      function applyPanelRounds(data) {
+        // Blank means "no admin choice" — the deployment's QM_SLACK_PANEL_ROUNDS, then 1.
+        $("slack-installation-panel-rounds").value =
+          typeof data?.panelRounds === "number" ? String(data.panelRounds) : "";
+      }
+      async function loadPanelRounds(requestId) {
+        const r = await api("GET", "/api/slack-installation");
+        // Governance can switch scope mid-flight; a stale read must not overwrite the new scope.
+        if (requestId !== undefined && requestId !== governanceReq) return;
+        if (!r.ok) {
+          // No Slack surface on this deployment at all: the control has nothing to govern.
+          if (r.status === 404) return $("card-panel-rounds").classList.add("hidden");
+          setStatus("st-panel-rounds", r.data?.message || "Failed to load debate rounds.", "err");
+          return;
+        }
+        applyPanelRounds(r.data);
+      }
+      $("panel-rounds-save").onclick = async () => {
+        const roundsRaw = $("slack-installation-panel-rounds").value.trim();
+        // Blank clears the setting back to the deployment default; anything else must be a whole
+        // number in range, checked here so a typo never costs a round trip.
+        const panelRounds = roundsRaw ? Number(roundsRaw) : null;
+        if (roundsRaw && (!Number.isInteger(panelRounds) || panelRounds < 1 || panelRounds > 20)) {
+          setStatus("st-panel-rounds", "Debate rounds must be a whole number from 1 to 20.", "err");
+          return;
+        }
+        $("panel-rounds-save").disabled = true;
+        setStatus("st-panel-rounds", "Saving...", "saving", true);
+        const r = await api("PUT", "/api/slack-installation", { panelRounds });
+        $("panel-rounds-save").disabled = false;
+        if (!r.ok) {
+          setStatus("st-panel-rounds", r.data?.message || "Save failed.", "err");
+          return;
+        }
+        await loadPanelRounds();
+        setStatus("st-panel-rounds", "Saved", "ok");
       };
 
       let slackBots = [];
