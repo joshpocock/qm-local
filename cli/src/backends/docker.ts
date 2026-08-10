@@ -167,6 +167,34 @@ function ensureNetwork(ctx: DockerCtx): void {
   docker(["network", "create", ctx.network], /already exists/);
 }
 
+// Must match NETWORK in src/deploy/docker-deploy-provider.ts. Published mini-apps run as their
+// own containers on this dedicated bridge; core reaches them by container name across it.
+const DEPLOY_NETWORK = "agent-deploynet";
+
+/**
+ * Puts a freshly-(re)created core on the deploy network so previously-published apps keep
+ * serving after `qm up` and after a host reboot — without waiting for the next publish.
+ *
+ * The deploy provider joins core to this network lazily, inside `apply()`, but `qm up` does
+ * `docker rm -f core` + `docker run`, which drops that membership; nothing would rejoin it until
+ * someone published again, so every existing `/deployments/<id>/` route 502s in the meantime.
+ * Doing it here, at bring-up, closes that window. Core keeps only this extra edge to the apps —
+ * the apps never join core's own network, so they still cannot see the database or anything else.
+ *
+ * Only the containerised local backend needs it (same condition that mounts docker.sock and sets
+ * LOCAL_SANDBOX_SHARED_NETWORK); on the host dev loop apps are reached over a published loopback
+ * port and no shared network exists. Idempotent: the network may already exist and core may
+ * already be attached, both of which are the steady state after the first deploy.
+ */
+function joinDeployNetwork(ctx: DockerCtx): void {
+  if (serviceEnv(ctx, "core").SANDBOX_BACKEND !== "local") return;
+  docker(["network", "create", DEPLOY_NETWORK], /already exists/);
+  docker(
+    ["network", "connect", DEPLOY_NETWORK, cname(ctx, "core")],
+    /already exists|already connected|endpoint with name .* already exists/i,
+  );
+}
+
 function persistRestart(name: string): void {
   docker(["update", "--restart", "unless-stopped", name]);
 }
@@ -764,6 +792,7 @@ export async function dockerUp(
       run.cleanup();
     }
     await waitReady(ctx, def.name);
+    if (def.name === "core") joinDeployNetwork(ctx);
     ok(`${def.name} ready`);
   }
 

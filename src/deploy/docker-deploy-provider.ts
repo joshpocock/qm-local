@@ -98,6 +98,11 @@ export function createDockerDeployProvider(opts: DockerDeployProviderOptions = {
         name(d),
         "--network",
         NETWORK,
+        // Survive a host reboot without a manual restart. `destroy()` uses `rm -f`, which removes
+        // the container regardless of policy, so a deliberate teardown is unaffected; only an
+        // unplanned stop (reboot, daemon restart) is auto-recovered.
+        "--restart",
+        "unless-stopped",
         "--memory",
         "512m",
         "--cpus",

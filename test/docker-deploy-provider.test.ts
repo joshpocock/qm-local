@@ -145,6 +145,18 @@ test("the entrypoint and env still ride on the container", async () => {
   assert.deepEqual(create.slice(create.indexOf("-w"), create.indexOf("-w") + 2), ["-w", "/app"]);
 });
 
+test("the app is created with a restart policy so a host reboot brings it back", async () => {
+  for (const inContainer of [true, false]) {
+    const d = fakeDocker();
+    const provider = createDockerDeployProvider({ exec: d.exec, inContainer, self: "core-1", basePort: 9200 });
+    await provider.apply(deployment, version);
+    const create = d.find("create")!;
+    const i = create.indexOf("--restart");
+    assert.notEqual(i, -1, `--restart is present (inContainer=${inContainer})`);
+    assert.equal(create[i + 1], "unless-stopped", "unplanned stops (reboot, daemon restart) auto-recover");
+  }
+});
+
 test("destroy removes the container and returns its port to the pool", async () => {
   const d = fakeDocker();
   const provider = createDockerDeployProvider({ exec: d.exec, inContainer: false, basePort: 9200 });
