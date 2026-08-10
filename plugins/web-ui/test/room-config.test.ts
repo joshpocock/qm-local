@@ -336,6 +336,7 @@ test("entries written before rooms existed produce messages with no author at al
 
 const chat = readFileSync(new URL("../src/chat.ts", import.meta.url), "utf8");
 const composer = readFileSync(new URL("../src/composer.ts", import.meta.url), "utf8");
+const css = readFileSync(new URL("../src/shell.css", import.meta.url), "utf8");
 
 test("the settled-row cache key includes the author, or a room's labels go stale", () => {
   assert.match(chat, /const persona = personaRowKey\(msg\.persona\);/);
@@ -497,6 +498,41 @@ test("the composer says how tagging works, without deciding who replies", () => 
     false,
     "@tag routing is core-side only — the client must not fork on it",
   );
+});
+
+test("the header's left column is the title and one quiet sub-line; the roster trails on the row", () => {
+  const at = chat.indexOf("function chatHeader(");
+  assert.ok(at > 0, "chatHeader is still where the header is built");
+  const header = chat.slice(at, chat.indexOf("\n  }", at));
+  const headingAt = header.indexOf('class="chat-heading"');
+  const subtitleAt = header.indexOf('class="chat-subtitle"');
+  const metaAt = header.indexOf('class="chat-topbar-meta"');
+  const actionsAt = header.indexOf('class="topbar-actions"');
+  assert.ok(headingAt >= 0 && subtitleAt > headingAt, "the title and Read-only line stack, in that order");
+  assert.ok(metaAt > subtitleAt, "the roster left the heading stack");
+  assert.ok(
+    header.lastIndexOf("</div>", metaAt) > subtitleAt,
+    "and is a sibling of .chat-heading, not another line inside it",
+  );
+  assert.ok(metaAt < actionsAt, "sitting on the header row, before the actions it right-aligns against");
+  assert.match(
+    header,
+    /room\?\.personaIds\.length\s*\r?\n?\s*\? html`<div class="chat-topbar-meta">\$\{roomRosterChips\(room\)\}<\/div>`/,
+    "the very same chips (and their '· N rounds'), and no empty box spending the header's gap when there is no room",
+  );
+});
+
+test("the trailing header meta right-aligns, and wraps below the title rather than overflowing", () => {
+  const block = css.slice(css.indexOf(".chat-topbar-meta {"));
+  const base = block.slice(0, block.indexOf(".topbar-actions {"));
+  assert.match(base, /justify-content: flex-end/, "it hangs off the right edge of the header row");
+  assert.match(base, /flex: 0 1 auto/, "and gives way before the title does");
+  assert.match(base, /\.chat-topbar-meta \.room-roster \{[^}]*margin-top: 0/, "no stacked-under-the-title offset left");
+  const narrow = css.slice(css.indexOf("@media (max-width: 700px) {"));
+  const query = narrow.slice(0, narrow.indexOf("\n}\n"));
+  assert.match(query, /\.chat-topbar \{[^}]*flex-wrap: wrap/, "the row is allowed to become two rows");
+  assert.match(query, /\.chat-topbar \{[^}]*height: auto/, "the fixed 56px band cannot clip the wrapped line");
+  assert.match(query, /\.chat-topbar-meta \{[^}]*flex: 1 0 100%/, "and the chips take the second line whole");
 });
 
 test("a room thread reads as a room in the live pane: its name, then its roster", () => {

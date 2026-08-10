@@ -645,11 +645,14 @@ body.resizing-sidebar {
   opacity: 0.8;
 }
 
-/* A Slack channel heading borrows the project group's markup wholesale, but it has no
-   options menu — so its thread count is an ordinary inline chip rather than the absolutely
-   positioned one that cross-fades with a project's "…" button on hover. */
-.recent-project.slack-channel .recent-project-head .recent-project-count,
-.recent-project.slack-channel .recent-project-head:hover .recent-project-count {
+/* A Slack channel heading borrows the project group's markup wholesale, including the "…"
+   button and the count that cross-fades with it on hover — the channel's debate-rounds
+   ceiling is set from there. A channel whose threads carry no policy scope has nothing to
+   put in that menu and renders none, and its count goes back to being an ordinary inline
+   chip rather than the absolutely positioned half of a cross-fade with a button that is not
+   there. */
+.recent-project.slack-channel .recent-project-head:not(:has(.session-menu)) .recent-project-count,
+.recent-project.slack-channel .recent-project-head:not(:has(.session-menu)):hover .recent-project-count {
   position: static;
   inset: auto;
   padding-right: 7px;
@@ -1063,6 +1066,22 @@ body.resizing-sidebar {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* A room's roster and its round count sit ON the header row, trailing, rather than stacked
+   under the title: the heading is the conversation's name and its one quiet sub-line, and
+   everything describing the conversation lines up on the right with the actions. Shrinks
+   before the title does, and scrolls inside itself (`.room-roster`) rather than pushing. */
+.chat-topbar-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.chat-topbar-meta .room-roster {
+  margin-top: 0;
+  min-width: 0;
+  justify-content: flex-end;
 }
 .topbar-actions {
   display: flex;
@@ -2742,6 +2761,26 @@ body.resizing-sidebar {
 .channel-rounds select:focus-visible {
   outline: 2px solid var(--primary, #d99a21);
   outline-offset: 2px;
+}
+/* The same control, reached from the channel row instead of from inside a thread. In the
+   read-only pane it is a card floating over the transcript and needs its own frame; in a
+   dialog the dialog is the frame, so it drops the border and the inset and just sits in the
+   body's flow. */
+.channel-rounds-dialog {
+  width: min(420px, 100%);
+}
+.channel-rounds-dialog .channel-rounds {
+  width: 100%;
+  margin: 16px 0 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.channel-rounds-unavailable {
+  margin: 16px 0 0;
+  color: var(--destructive, #c0392b);
+  font-size: 12.5px;
+  line-height: 1.5;
 }
 .readonly-scroll {
   padding-top: 20px;
@@ -4475,6 +4514,25 @@ body.resizing-sidebar {
   .skill-import-trigger,
   .pane .btn {
     min-height: 44px;
+  }
+}
+
+/* Too narrow for a title and a roster to share one line without one of them losing: the
+   chips take a line of their own under the heading instead of scrolling out of reach. The
+   topbar stops being a fixed 56px band and grows to whatever it wraps to — nothing is
+   positioned against that height (the room and context banners are absolute overlays on the
+   transcript, not on the header). */
+@media (max-width: 700px) {
+  .chat-topbar {
+    height: auto;
+    min-height: calc(54px + var(--surface-safe-top));
+    flex-wrap: wrap;
+    padding-bottom: 6px;
+  }
+  .chat-topbar-meta {
+    order: 3;
+    flex: 1 0 100%;
+    justify-content: flex-start;
   }
 }
 

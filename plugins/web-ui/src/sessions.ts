@@ -20,11 +20,13 @@ import {
   PinOff,
   Plus,
   RefreshCw,
+  Repeat,
   SquareTerminal,
   User,
   Users,
   X,
 } from "lucide";
+import { channelRoundsScopeFor, openChannelRoundsDialog } from "./channel-rounds";
 import { defaultRoomNameFor, noteRoom, type RoomConfig } from "./room-state";
 import { ensureRoomPersonas, openEditRoomDialog, roomRosterDots } from "./rooms";
 import {
@@ -475,10 +477,44 @@ function channelPrivateMark(channelId: string): TemplateResult | typeof nothing 
   return html`<span class="private-chip" title="Private channel">${icon(Lock, 10)}<span>Private</span></span>`;
 }
 
+/**
+ * The channel row's kebab, and the one thing in it.
+ *
+ * The debate-rounds ceiling is a fact about the CHANNEL, but until now the only door to it
+ * was inside an open thread — which taught people it was a per-thread setting. It belongs on
+ * the row that represents the channel, in the same kebab a project row and a room row already
+ * carry. `scopeId` is `channelRoundsScopeFor`'s answer over the threads mirrored under this
+ * heading, i.e. exactly the scope the in-conversation control writes to.
+ */
+function channelMenuPopover(item: Extract<SlackListItem, { kind: "channel" }>, scopeId: string): TemplateResult {
+  return html`
+    <div class="session-menu-popover" role="menu" ${ref(placeSessionMenu)} @click=${(e: Event) => e.stopPropagation()}>
+      <button
+        class="session-menu-option session-menu-channel-rounds"
+        type="button"
+        role="menuitem"
+        @click=${() => {
+          sessionsState.openMenuId = null;
+          renderList();
+          openChannelRoundsDialog(scopeId, slackChannelName(item));
+        }}
+      >
+        ${icon(Repeat, 15)}<span>Debate rounds…</span>
+      </button>
+    </div>
+  `;
+}
+
 function slackChannelGroup(item: Extract<SlackListItem, { kind: "channel" }>): TemplateResult {
   const collapsed = sessionsState.collapsedSlackChannels.has(item.channelId);
   const name = slackChannelName(item);
   const childrenId = `slack-channel-${item.channelId.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+  // Null for a channel whose threads carry no policy scope — the same channels whose open
+  // conversations show no rounds control either. No scope, no kebab: the row never offers a
+  // setting that has nowhere to be stored.
+  const scopeId = channelRoundsScopeFor(item.sessions);
+  const menuKey = `slack-channel:${item.channelId}`;
+  const menuOpen = sessionsState.openMenuId === menuKey;
   return html`
     <section
       class="recent-project slack-channel ${item.sessions.some(isActiveRow) ? "active" : ""}"
@@ -496,7 +532,26 @@ function slackChannelGroup(item: Extract<SlackListItem, { kind: "channel" }>): T
           <span class="recent-project-name">${name}</span>
           ${channelPrivateMark(item.channelId)}
         </button>
-        <span class="recent-project-count">${item.sessions.length}</span>
+        ${
+          scopeId
+            ? html`<div class="session-menu recent-project-menu ${menuOpen ? "menu-open" : ""}">
+                <span class="recent-project-count">${item.sessions.length}</span>
+                <button
+                  class="session-menu-btn"
+                  data-menu-id=${menuKey}
+                  type="button"
+                  title="Channel options"
+                  aria-label=${`Options for ${name}`}
+                  aria-haspopup="menu"
+                  aria-expanded=${menuOpen ? "true" : "false"}
+                  @click=${(e: Event) => toggleSessionMenu(e, menuKey)}
+                >
+                  ${icon(EllipsisVertical, 17)}
+                </button>
+                ${menuOpen ? channelMenuPopover(item, scopeId) : nothing}
+              </div>`
+            : html`<span class="recent-project-count">${item.sessions.length}</span>`
+        }
       </div>
       <div class="recent-project-children" id=${childrenId} ?hidden=${collapsed}>
         ${repeat(

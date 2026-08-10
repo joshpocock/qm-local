@@ -17,10 +17,11 @@
  * `baseUpdatedAt` conflict snapshot rather than re-sent as blanks.
  */
 
-import { html, nothing, type TemplateResult } from "lit";
+import { html, nothing, render, type TemplateResult } from "lit";
+import { Hash, X } from "lucide";
 import { api } from "./core-bridge";
 import { errMessage } from "../../chassis/src/errors";
-import { fieldSelect } from "./ui";
+import { fieldSelect, icon } from "./ui";
 import { MAX_ROOM_ROUNDS, ROOM_ROUNDS } from "./room-state";
 
 /** The picker value that means "no override — follow whatever the org default is". */
@@ -74,6 +75,22 @@ export function channelRoundsApplies(s: { threadRef: string; scopeId?: string | 
   if (!s.threadRef.startsWith("ch:")) return false;
   const scope = s.scopeId ?? "";
   return scope.startsWith("channel:") || scope.startsWith("group:");
+}
+
+/**
+ * The scope a Slack channel's own controls write against, given the threads mirrored under it
+ * — or null when none of them has a policy scope to write to.
+ *
+ * Deliberately `channelRoundsApplies` over the channel's children rather than a scope minted
+ * from the raw channel id: the sidebar row and the conversation must edit the same row of
+ * `channel_policy`, and the only thing that knows which scope core actually stamped is a
+ * session core stamped. Returning null where the conversation would show no control is the
+ * point — the row offers the setting exactly where the thread does, and nowhere else.
+ */
+export function channelRoundsScopeFor(
+  sessions: readonly { threadRef: string; scopeId?: string | null }[],
+): string | null {
+  return sessions.find((s) => channelRoundsApplies(s))?.scopeId ?? null;
 }
 
 export function resetChannelRounds(): void {
@@ -288,4 +305,123 @@ export function channelRoundsControl(scopeId: string): TemplateResult | typeof n
         : nothing
     }
   </div>`;
+}
+
+// ---------------------------------------------------------------------------
+// The same control, opened from the channel row
+// ---------------------------------------------------------------------------
+
+/**
+ * Reaching the ceiling only through an open thread taught the wrong thing: a channel-global
+ * setting read as a per-thread one, because a thread was the only place it appeared. The
+ * channel row's kebab opens this dialog, which hosts the very same `channelRoundsControl`
+ * against the very same scope — one control, two doors, no second copy of the fetch or the
+ * PUT to keep in step.
+ */
+interface ChannelRoundsDialogState {
+  open: boolean;
+  scopeId: string;
+  /** `#name` as the row shows it, so the dialog names the channel the same way. */
+  label: string;
+  opener: HTMLElement | null;
+  /**
+   * The scope (and redraw) that owned the shared state before the dialog borrowed it. The
+   * module holds ONE channel's policy at a time, so opening this over a mounted conversation
+   * would otherwise leave that conversation's control blank until its pane remounted.
+   */
+  prior: { scopeId: string; redraw: () => void } | null;
+}
+
+const dialogState: ChannelRoundsDialogState = {
+  open: false,
+  scopeId: "",
+  label: "",
+  opener: null,
+  prior: null,
+};
+
+let dialogHost: HTMLElement | null = null;
+
+function ensureDialogHost(): HTMLElement {
+  if (dialogHost?.isConnected) return dialogHost;
+  dialogHost = document.createElement("div");
+  dialogHost.className = "channel-rounds-dialog-host";
+  document.body.appendChild(dialogHost);
+  return dialogHost;
+}
+
+function drawChannelRoundsDialog(): void {
+  const host = ensureDialogHost();
+  render(dialogState.open ? channelRoundsDialogTpl() : nothing, host);
+  const dialog = host.querySelector<HTMLDialogElement>(".channel-rounds-dialog");
+  if (dialog && !dialog.open) dialog.showModal();
+}
+
+export function openChannelRoundsDialog(scopeId: string, label: string): void {
+  dialogState.opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  dialogState.open = true;
+  dialogState.scopeId = scopeId;
+  dialogState.label = label;
+  dialogState.prior = channelRoundsState.scope ? { scopeId: channelRoundsState.scope, redraw } : null;
+  // Loaded before the first paint, not after it: `loadChannelRounds` parks the scope and the
+  // loading flag synchronously, so the dialog opens on "Loading…" rather than on the previous
+  // channel's state or on a "couldn't load" that has not been tried yet.
+  void loadChannelRounds(scopeId, drawChannelRoundsDialog);
+  drawChannelRoundsDialog();
+}
+
+export function closeChannelRoundsDialog(): void {
+  if (!dialogState.open) return;
+  dialogState.open = false;
+  const opener = dialogState.opener;
+  const prior = dialogState.prior;
+  dialogState.opener = null;
+  dialogState.prior = null;
+  drawChannelRoundsDialog();
+  // Hand the shared state back, and repaint whoever had it — including when it is the same
+  // channel, whose number may have just changed under it.
+  if (prior) void loadChannelRounds(prior.scopeId, prior.redraw).then(() => prior.redraw());
+  queueMicrotask(() => opener?.isConnected && opener.focus());
+}
+
+function channelRoundsDialogTpl(): TemplateResult {
+  // Only ever says "couldn't load" about THIS channel's own settled failure; anything else is
+  // still in flight, and `channelRoundsControl` paints that itself.
+  const unreadable =
+    channelRoundsState.scope === dialogState.scopeId && !channelRoundsState.loading && !channelRoundsState.loaded;
+  return html`
+    <dialog
+      class="project-dialog channel-rounds-dialog"
+      aria-labelledby="channel-rounds-dialog-title"
+      @close=${closeChannelRoundsDialog}
+      @click=${(event: MouseEvent) =>
+        event.target === event.currentTarget && (event.currentTarget as HTMLDialogElement).close()}
+    >
+      <div class="project-dialog-head">
+        <span class="context-glyph large">${icon(Hash, 21)}</span>
+        <div><h2 id="channel-rounds-dialog-title">Debate rounds</h2></div>
+        <button
+          class="project-icon-button"
+          type="button"
+          aria-label="Close debate rounds"
+          title="Close"
+          data-dialog-cancel
+          @click=${closeChannelRoundsDialog}
+        >
+          ${icon(X, 16)}
+        </button>
+      </div>
+      <p class="room-dialog-lead">
+        The ceiling for every debate in <strong>${dialogState.label}</strong> — this is the channel's setting, not one
+        thread's. A thread can ask for fewer rounds than this; none can run more.
+      </p>
+      ${
+        unreadable
+          ? html`<p class="channel-rounds-unavailable">
+              ${channelRoundsState.notice || "Couldn't load this channel's debate rounds."}
+            </p>`
+          : channelRoundsControl(dialogState.scopeId)
+      }
+    </dialog>
+  `;
 }

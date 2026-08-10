@@ -1205,8 +1205,18 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
         <div class="chat-heading">
           <div class="chat-title">${title}</div>
           <div class="chat-subtitle">${readOnly ? "Read-only" : detail}</div>
-          ${roomRosterChips(room)}
         </div>
+        ${
+          // The roster and its round count describe the conversation; they are not part of its
+          // name. Stacked under the title they crushed a mirrored Slack thread's header into
+          // four tight lines — headline, "Read-only", chips, rounds — with the banner directly
+          // beneath. On the header row instead, right-aligned before the actions, so the left
+          // column is the title and its quiet sub-line and nothing else. Omitted entirely
+          // rather than left empty: an empty box would still spend the header's gap.
+          room?.personaIds.length
+            ? html`<div class="chat-topbar-meta">${roomRosterChips(room)}</div>`
+            : nothing
+        }
         <div class="topbar-actions">
           ${
             chatState.sessionId && can("admin")

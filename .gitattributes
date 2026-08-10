@@ -1,0 +1,9 @@
+# Windows checkouts kept flipping working-tree files to CRLF, which breaks two things in
+# this repo: the admin app's single inline script is CSP-hashed, so a CRLF copy is refused
+# by the browser and the page hangs on "Checking your access...", and a CSS source test
+# compares bytes it cannot match. Nothing here needs CRLF, so pin everything to LF.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.ico binary
+*.exe binary
