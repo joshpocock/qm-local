@@ -128,8 +128,16 @@ Non-secret (`[env]`): `PORT` (8097 local / 8080 image), `PORTAL_PUBLIC_URL`, `CO
 There is no `PORTAL_ADMIN_PRINCIPALS` — admin
 access is derived from the core (see the security model above).
 For local development only, `PORTAL_LOCAL_AUTH_BYPASS=1` mints a local session as
-`PORTAL_DEV_PRINCIPAL` without contacting OIDC. The portal refuses this in production
-and only accepts it when `PORTAL_PUBLIC_URL` is loopback.
+`PORTAL_DEV_PRINCIPAL` without contacting OIDC. The portal refuses this in production,
+and applies it **per request**, never per deployment: a request only qualifies when its
+`Host` header names loopback (`localhost`, `127.0.0.1`, `[::1]`, any port), carries no
+Cloudflare edge headers (`cf-ray`, `cf-connecting-ip`, `cf-ipcountry`, `cf-visitor`), and
+either comes from a loopback peer address or the deployment set
+`PORTAL_LOCAL_BYPASS_TRUSTED_INGRESS=1` (which it may only do having bound the published
+port to the host's loopback). That lets one deployment serve a private localhost front
+door with auto sign-in and a public hostname with the real sign-in flow at the same time.
+`PORTAL_PUBLIC_URL` stays the public URL either way — it is what sign-in links, OAuth
+redirect URIs, and the cookie domain/`Secure` flags are built from.
 
 Identity: `OIDC_PRINCIPAL_CLAIM` — `email` (default; the org-canonical id: the
 verified work email, lowercased; sign-in fails unless the IdP marks the email verified) or `sub`

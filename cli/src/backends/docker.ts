@@ -409,12 +409,13 @@ function runArgs(ctx: DockerCtx, service: ServiceName, image: string): { args: s
   // signed portal identity and source auth.
   if (service === "portal" || service === "auth") args.push("-e", "NODE_ENV=development");
   // qm-local: on a local test drive, signing in should not be a chore. The
-  // portal already ships a local bypass, gated three ways (explicitly
-  // requested, not production, and a localhost/127.0.0.1/::1 public URL), so
-  // it cannot apply to a real deployment. Default it on for the docker target
-  // and sign in as the first admin from ADMIN_GRANTS. Opt out with
-  // QM_NO_LOCAL_AUTH_BYPASS=1, or by setting PORTAL_LOCAL_AUTH_BYPASS
-  // yourself, to walk the real sign-in flow instead.
+  // portal ships a local bypass gated three ways (explicitly requested, not
+  // production, and — per request, not per deployment — a loopback Host header
+  // with no Cloudflare edge headers), so it cannot apply to traffic arriving
+  // over a public hostname. Default it on for the docker target and sign in as
+  // the first admin from ADMIN_GRANTS. Opt out with QM_NO_LOCAL_AUTH_BYPASS=1,
+  // or by setting PORTAL_LOCAL_AUTH_BYPASS=0 yourself, to walk the real
+  // sign-in flow instead.
   if (service === "portal" && localAuthBypassEnabled(env)) {
     args.push("-e", "PORTAL_LOCAL_AUTH_BYPASS=1");
     // Peer address cannot gate this from inside a container (host traffic
@@ -514,9 +515,20 @@ function hostClaudeCredentialsPath(): string | undefined {
 /**
  * Local sign-in bypass: on by default for this local-only target, off if the
  * operator asked for the real flow or configured the portal env themselves.
+ *
+ * An explicit `PORTAL_LOCAL_AUTH_BYPASS` in the config wins outright. That
+ * matters now that the portal decides the bypass PER REQUEST (loopback Host,
+ * no Cloudflare edge headers) instead of from the configured public URL: a
+ * deployment with a public `publicUrl` opting into the bypass is a sensible
+ * combination — localhost auto-signs in, the hostname signs in for real — and
+ * it only works if the CLI also grants trusted ingress and binds the published
+ * port to loopback, which is what returning true here does. Configs that leave
+ * the var undefined behave exactly as before.
  */
 function localAuthBypassEnabled(env: Record<string, string>): boolean {
-  return process.env.QM_NO_LOCAL_AUTH_BYPASS !== "1" && env.PORTAL_LOCAL_AUTH_BYPASS === undefined;
+  const configured = env.PORTAL_LOCAL_AUTH_BYPASS;
+  if (configured !== undefined) return configured === "1";
+  return process.env.QM_NO_LOCAL_AUTH_BYPASS !== "1";
 }
 
 /** First email in ADMIN_GRANTS ("a@x.com:org_admin,b@x.com:org_admin"). */

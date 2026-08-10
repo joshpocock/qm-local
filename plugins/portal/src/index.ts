@@ -1,4 +1,4 @@
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer, type IncomingHttpHeaders, type IncomingMessage, type ServerResponse } from "node:http";
 import { pathToFileURL } from "node:url";
 import { LRUCache } from "lru-cache";
 import {
@@ -67,7 +67,16 @@ const ORIGIN = (() => {
   }
 })();
 const LOCAL_AUTH_BYPASS_REQUESTED = process.env.PORTAL_LOCAL_AUTH_BYPASS === "1";
-const LOCAL_AUTH_BYPASS = LOCAL_AUTH_BYPASS_REQUESTED && !IS_PROD && isLocalPortalUrl(PUBLIC_URL);
+// qm-local: this used to also require a loopback PORTAL_PUBLIC_URL, which made
+// "localhost signs me in automatically" and "the public hostname exists at all"
+// mutually exclusive — one deployment could not do both. But the property the
+// bypass protects is "this request provably came from this machine", which is a
+// property of the REQUEST, not of the configured public URL. So the global gate
+// is now only "asked for, and not production", and the this-machine test moved
+// per-request into isLocalBypassRequest() below. PUBLIC_URL keeps its job for
+// everything it is actually about: sign-in links, OAuth redirect URIs, cookie
+// domain and Secure flags.
+const LOCAL_AUTH_BYPASS = LOCAL_AUTH_BYPASS_REQUESTED && !IS_PROD;
 const LOCAL_AUTH_PRINCIPAL = process.env.PORTAL_DEV_PRINCIPAL || process.env.USER || "dev-admin";
 // qm-local: set only by a deployment that has bound the portal's published
 // port to the host loopback, so peer address is no longer the reachability gate.
@@ -247,7 +256,17 @@ function sameOriginRequest(req: IncomingMessage): boolean {
     typeof origin === "string" &&
     (() => {
       try {
-        return new URL(origin).origin === ORIGIN;
+        const parsed = new URL(origin);
+        if (parsed.origin === ORIGIN) return true;
+        // qm-local: dual mode. This deployment also answers on a private
+        // loopback front door whose origin is NOT the configured public one, so
+        // pinning CSRF to PUBLIC_URL alone would 403 every write the desktop app
+        // makes. Accept the loopback origin only for a request that is itself
+        // provably local AND whose Origin is that very door (host and port equal
+        // to its own Host header) — which is what "same origin" means there.
+        // Traffic over the public hostname is never provably local, so it still
+        // has to match ORIGIN, and no third-party origin matches either way.
+        return isLocalBypassRequest(req) && parsed.host === req.headers.host;
       } catch {
         return false;
       }
@@ -274,21 +293,6 @@ export function hostIsWithinDomain(host: string, domain: string): boolean {
   const h = host.toLowerCase();
   const d = domain.toLowerCase().replace(/^\./, "");
   return !!h && !!d && (h === d || h.endsWith(`.${d}`));
-}
-
-function isLocalPortalUrl(raw: string): boolean {
-  try {
-    const hostname = new URL(raw).hostname.toLowerCase();
-    return (
-      hostname === "localhost" ||
-      hostname.endsWith(".localhost") ||
-      hostname === "127.0.0.1" ||
-      hostname === "::1" ||
-      hostname === "[::1]"
-    );
-  } catch {
-    return false;
-  }
 }
 
 function originOf(raw: string): string {
@@ -329,15 +333,75 @@ export function isLoopbackAddress(address: string | null | undefined): boolean {
   );
 }
 
+/**
+ * Headers the Cloudflare edge stamps on everything it proxies. cloudflared has
+ * no switch to strip them, so seeing any of them is proof the request arrived
+ * over the public hostname rather than from this machine.
+ */
+const CLOUDFLARE_EDGE_HEADERS = ["cf-ray", "cf-connecting-ip", "cf-ipcountry", "cf-visitor"] as const;
+
+/** A `Host` header (any port) naming this machine's loopback interface. */
+export function isLoopbackHostHeader(host: string | string[] | undefined): boolean {
+  if (typeof host !== "string") return false;
+  const raw = host.trim().toLowerCase();
+  if (!raw) return false;
+  let name: string;
+  if (raw.startsWith("[")) {
+    const end = raw.indexOf("]");
+    if (end < 0) return false;
+    name = raw.slice(1, end);
+  } else {
+    const colon = raw.indexOf(":");
+    name = colon < 0 ? raw : raw.slice(0, colon);
+  }
+  return (
+    name === "localhost" ||
+    name === "::1" ||
+    name === "0:0:0:0:0:0:0:1" ||
+    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(name)
+  );
+}
+
+type LocalBypassRequest = { headers: IncomingHttpHeaders; socket: { remoteAddress?: string | undefined } };
+
+/**
+ * qm-local: is THIS request provably from this machine? One deployment serves
+ * both a private localhost front door (auto sign-in, what the desktop app uses)
+ * and a public hostname (real sign-in), so the answer cannot come from the
+ * configured PORTAL_PUBLIC_URL — it has to be read off the request.
+ *
+ * The `Host` check is load-bearing and must not be "simplified" away: cloudflared
+ * runs on this same host and dials the portal over loopback, so tunneled traffic
+ * can present a LOOPBACK SOURCE ADDRESS. What separates it is the `Host` header,
+ * which cloudflared forwards unchanged from the browser (qm.strideops.ai). The
+ * Cloudflare edge-header check is defense in depth behind that.
+ *
+ * `gates` exists so tests can drive the two module-level switches directly;
+ * production callers pass nothing and get the real ones.
+ */
+export function isLocalBypassRequest(
+  req: LocalBypassRequest,
+  gates: { enabled?: boolean; trustedIngress?: boolean } = {},
+): boolean {
+  const enabled = gates.enabled ?? LOCAL_AUTH_BYPASS;
+  if (!enabled) return false;
+  if (!isLoopbackHostHeader(req.headers.host)) return false;
+  for (const header of CLOUDFLARE_EDGE_HEADERS) {
+    if (req.headers[header] !== undefined) return false;
+  }
+  // The loopback peer check exists so only someone on this machine can use the
+  // bypass. When the portal runs in a container, host traffic arrives from the
+  // docker bridge gateway rather than 127.0.0.1, so the check rejects the very
+  // case the bypass is for. TRUSTED_LOCAL_INGRESS is set by the CLI only when it
+  // has also published the port to the host's loopback interface, which enforces
+  // the same "this machine only" property one layer out.
+  const trustedIngress = gates.trustedIngress ?? TRUSTED_LOCAL_INGRESS;
+  if (!trustedIngress && !isLoopbackAddress(req.socket.remoteAddress)) return false;
+  return true;
+}
+
 function localDevSession(req: IncomingMessage, nowMs = Date.now(), ignoreLogout = false): SessionClaims | null {
-  if (!LOCAL_AUTH_BYPASS) return null;
-  // qm-local: the loopback check exists so only someone on this machine can
-  // use the bypass. When the portal runs in a container, host traffic arrives
-  // from the docker bridge gateway rather than 127.0.0.1, so the check rejects
-  // the very case the bypass is for. TRUSTED_LOCAL_INGRESS is set by the CLI
-  // only when it has also published the port to the host's loopback interface,
-  // which enforces the same "this machine only" property one layer out.
-  if (!TRUSTED_LOCAL_INGRESS && !isLoopbackAddress(req.socket.remoteAddress)) return null;
+  if (!isLocalBypassRequest(req)) return null;
   if (!ignoreLogout && readCookie(req.headers.cookie, LOCAL_LOGOUT_COOKIE) === "1") return null;
   const now = Math.floor(nowMs / 1000);
   return { k: "session", sub: LOCAL_AUTH_PRINCIPAL, org: ORG, iat: now, exp: now + SESSION_TTL_S };
@@ -854,7 +918,9 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       clearCookie("portal_session", "/", SECURE_COOKIES, COOKIE_DOMAIN),
       ...(COOKIE_DOMAIN ? [clearCookie("portal_session", "/", SECURE_COOKIES)] : []),
       clearCookie("portal_oidc_tmp", "/auth", SECURE_COOKIES),
-      ...(LOCAL_AUTH_BYPASS && isLoopbackAddress(req.socket.remoteAddress)
+      // Only a request that would have been auto-signed-in needs the sticky
+      // local-logout marker; a public-hostname logout is a plain cookie clear.
+      ...(isLocalBypassRequest(req)
         ? [setCookie(LOCAL_LOGOUT_COOKIE, "1", { path: "/", maxAge: SESSION_TTL_S, secure: SECURE_COOKIES })]
         : []),
     ]);
@@ -1180,9 +1246,6 @@ export function bootChecks(): void {
   if (LOCAL_AUTH_BYPASS_REQUESTED && IS_PROD) {
     problems.push("PORTAL_LOCAL_AUTH_BYPASS may not be enabled in production");
   }
-  if (LOCAL_AUTH_BYPASS_REQUESTED && !isLocalPortalUrl(PUBLIC_URL)) {
-    problems.push("PORTAL_LOCAL_AUTH_BYPASS requires a localhost, 127.0.0.1, or ::1 PORTAL_PUBLIC_URL");
-  }
   if (PLAYGROUND) {
     if (!Number.isInteger(PLAYGROUND_MINTS_PER_IP) || PLAYGROUND_MINTS_PER_IP < 1 || PLAYGROUND_MINTS_PER_IP > 64) {
       problems.push(
@@ -1332,7 +1395,8 @@ export function startServer(): void {
       console.warn("[portal] PORTAL_PUBLIC_URL is not https — cookies are NOT Secure (dev/test only)");
     if (LOCAL_AUTH_BYPASS)
       console.warn(
-        `[portal] PORTAL_LOCAL_AUTH_BYPASS=1 -- using ${LOCAL_AUTH_PRINCIPAL} as the local session principal (dev/test only)`,
+        `[portal] PORTAL_LOCAL_AUTH_BYPASS=1 -- using ${LOCAL_AUTH_PRINCIPAL} as the local session principal (dev/test only);` +
+          ` only requests with a loopback Host header and no Cloudflare edge headers get it, everything else signs in for real`,
       );
     if (PLAYGROUND)
       console.warn(
